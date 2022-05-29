@@ -1,6 +1,9 @@
 import os
 import subprocess
 import shutil
+from glob import glob
+
+from process.compression import copy_files_to_lzma_tar
 
 
 def fmriprep_cmd(config):
@@ -28,7 +31,7 @@ def run_fmriprep(config, cleanup=True):
     freesurfer_dir = os.path.join(config['output_root'], 'freesurfer')
     summary_dir = os.path.join(config['output_root'], 'summary')
     confounds_dir = os.path.join(config['output_root'], 'confounds')
-    for dir_name in [log_dir, fmriprep_dir, freesurfer_dir, summary_dir]:
+    for dir_name in [log_dir, fmriprep_dir, freesurfer_dir, summary_dir, confounds_dir]:
         os.makedirs(dir_name, exist_ok=True)
 
     finish_fn = f'{log_dir}/{sid}_fmriprep_finish.txt'
@@ -40,14 +43,17 @@ def run_fmriprep(config, cleanup=True):
     with open(running_fn, 'w') as f:
         f.write('')
 
-    fmriprep_fn = f'{fmriprep_dir}/{sid}.tar.lzma'
-    freesurfer_fn = f'{fmriprep_dir}/{sid}.tar.lzma'
-    if all([os.path.exists(_) for _ in [fmriprep_fn, freesurfer_fn]]):
+    fmriprep_fn = os.path.join(fmriprep_dir, f'{sid}.tar.lzma')
+    freesurfer_fn = os.path.join(freesurfer_dir, f'{sid}.tar.lzma')
+    summary_fn = os.path.join(summary_dir, f'{sid}.tar.lzma')
+    confounds_fn = os.path.join(confounds_dir, f'{sid}.tar.lzma')
+    if all([os.path.exists(_) for _ in [fmriprep_fn, freesurfer_fn, summary_fn, confounds_fn]]):
         return
 
     fmriprep_out = os.path.join(config['fmriprep_out'], f'sub-{sid}')
     freesurfer_out = os.path.join(config['fmriprep_out'], 'sourcedata', 'freesurfer', f'sub-{sid}')
-    work_out = os.path.join(config['fmriprep_out'], 'fmriprep_wf', f'single_subject_{sid}_wf')
+    major, minor = config['fmriprep_version'].split('.')[:2]
+    work_out = os.path.join(config['fmriprep_work'], f'fmriprep_{major}_{minor}_wf', f'single_subject_{sid}_wf')
 
     if not all([os.path.exists(_) for _ in [fmriprep_out, freesurfer_out, work_out]]):
         cmd = fmriprep_cmd(config)
@@ -60,3 +66,35 @@ def run_fmriprep(config, cleanup=True):
             print(cmd)
             print(config['dset'], sid, proc.returncode)
             return
+
+    copy_files_to_lzma_tar(
+        fmriprep_fn,
+        # [fmriprep_out, fmriprep_out + '.html'],
+        [_ for _ in sorted(glob(os.path.join(config['fmriprep_out'], '*'))) if os.path.basename(_) != 'sourcedata'],
+        rename_func=lambda x: os.path.relpath(x, config['fmriprep_out'])
+    )
+    copy_files_to_lzma_tar(
+        freesurfer_fn,
+        [freesurfer_out],
+        rename_func=lambda x: os.path.relpath(x, os.path.join(config['fmriprep_out'], 'sourcedata', 'freesurfer'))
+    )
+    copy_files_to_lzma_tar(
+        summary_fn,
+        [fmriprep_out + '.html'] + sorted(glob(os.path.join(fmriprep_out, 'figures', '*'))),
+        rename_func=lambda x: os.path.relpath(x, config['fmriprep_out']),
+    )
+    copy_files_to_lzma_tar(
+        confounds_fn,
+        sorted(glob(os.path.join(fmriprep_out, 'func', '*.tsv'))) + sorted(glob(os.path.join(fmriprep_out, 'ses-*', 'func', '*.tsv'))),
+        rename_func=lambda x: os.path.relpath(x, config['fmriprep_out']),
+    )
+
+    if cleanup:
+        if all([os.path.exists(_) for _ in [fmriprep_fn, freesurfer_fn, summary_fn, confounds_fn]]):
+            for root in [config['fmriprep_out'], config['fmriprep_work']]:
+                shutil.rmtree(root)
+
+    with open(finish_fn, 'w') as f:
+        f.write('')
+    if os.path.exists(running_fn):
+        os.remove(running_fn)
