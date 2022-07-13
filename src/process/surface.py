@@ -155,41 +155,55 @@ def interpolate_original_space(nii_data, nii_affines, coords, shape, lta, ref_to
     return interps
 
 
+class Hemisphere(object):
+    def __init__(self, sid, lr, fs_dir):
+        self.sid = sid
+        self.lr = lr
+        self.fs_dir = fs_dir
+
+        self.load_data()
+        self.compute_coordinates()
+        self.compute_transformation()
+
+    def load_data(self):
+        self.white, self.faces = nib.freesurfer.io.read_geometry(f'{self.fs_dir}/sub-{self.sid}/surf/{self.lr}h.white')
+        self.pial = nib.freesurfer.io.read_geometry(f'{self.fs_dir}/sub-{self.sid}/surf/{self.lr}h.pial')[0]
+        self.thicknesses = nib.freesurfer.io.read_morph_data(f'{self.fs_dir}/sub-{self.sid}/surf/{self.lr}h.thickness')
+        T1 = nib.load(f'{self.fs_dir}/sub-{self.sid}/mri/T1.mgz')
+        self.c_ras = (np.array([_//2 for _ in T1.shape] + [1]) @ T1.affine.T)[:3]
+
+    def compute_coordinates(self):
+        self.normals_sine = compute_vertex_normals_sine_weight(self.white, self.faces)
+        self.normals_equal = compute_vertex_normals_equal_weight(self.white, self.faces)
+
+        self.coords_normals_sine, self.shape = surface_coords_normal(
+            self.white, self.c_ras, self.normals_sine, self.thicknesses)
+        self.coords_normals_equal, shape = surface_coords_normal(
+            self.white, self.c_ras, self.normals_equal, self.thicknesses)
+        assert shape == self.shape
+
+        self.coords_pial, shape = surface_coords_pial(
+            self.white, self.c_ras, self.pial)
+        assert shape == self.shape
+
+    def compute_transformation(self):
+        self.native_sphere = nib.freesurfer.io.read_geometry(f'{self.fs_dir}/sub-{self.sid}/surf/{self.lr}h.sphere.reg')[0]
+        self.fsavg_sphere = nib.freesurfer.io.read_geometry(f'{self.fs_dir}/fsaverage/surf/{self.lr}h.sphere.reg')[0]
+        self.to_fsavg = nnfr_transformation(self.native_sphere, self.fsavg_sphere)
+
+
 class Interpolator(object):
     def __init__(self, sid, label, fs_dir, wf_dir):
         self.sid = sid
         self.label = label
         self.fs_dir = fs_dir
         self.wf_dir = wf_dir
-        self.surface_data = {'l': {}, 'r': {}}
+        self.interp_kwargs = {'order': 3, 'prefilter': False, 'cval': np.nan}
+        self.filtered = {}
 
-    def prepare(self):
-        # T1 = nib.load(f'{fs_dir}/sub-{sid}/mri/T1.mgz')
-        # c_ras = (np.array([_//2 for _ in T1.shape] + [1]) @ T1.affine.T)[:3]
-
+    def prepare(self, orders=[]):
         self.brainmask = nib.load(f'{self.fs_dir}/sub-{self.sid}/mri/brainmask.mgz')
-        self.c_ras = (np.array([_//2 for _ in self.brainmask.shape] + [1]) @ self.brainmask.affine.T)[:3]
-        # self.canonical = nib.as_closest_canonical(self.brainmask)
         self.vol_coords, self.vol_shape = canonical_volume_coords(self.brainmask, margin=2)
-
-        for lr in 'lr':
-            hemi = self.surface_data[lr]
-            hemi['white'], hemi['faces'] = nib.freesurfer.io.read_geometry(f'{self.fs_dir}/sub-{self.sid}/surf/{lr}h.white')
-            hemi['pial'] = nib.freesurfer.io.read_geometry(f'{self.fs_dir}/sub-{self.sid}/surf/{lr}h.pial')[0]
-            hemi['thicknesses'] = nib.freesurfer.io.read_morph_data(f'{self.fs_dir}/sub-{self.sid}/surf/{lr}h.thickness')
-            hemi['normals_sine'] = compute_vertex_normals_sine_weight(hemi['white'], hemi['faces'])
-            hemi['normals_equal'] = compute_vertex_normals_equal_weight(hemi['white'], hemi['faces'])
-
-            for key in ['normals_sine', 'normals_equal']:
-                hemi['coords_' + key], hemi['shape'] = surface_coords_normal(
-                    hemi['white'], self.c_ras, hemi[key], hemi['thicknesses'])
-            hemi['coords_pial'], shape = surface_coords_pial(
-                hemi['white'], self.c_ras, hemi['pial'])
-            assert hemi['shape'] == shape
-
-            hemi['native_sphere'] = nib.freesurfer.io.read_geometry(f'{self.fs_dir}/sub-{self.sid}/surf/{lr}h.sphere.reg')[0]
-            hemi['fsavg_sphere'] = nib.freesurfer.io.read_geometry(f'{self.fs_dir}/fsaverage/surf/{lr}h.sphere.reg')[0]
-            hemi['sphere_T'] = nnfr_transformation(hemi['native_sphere'], hemi['fsavg_sphere'])
 
         self.hmc = nt.io.itk.ITKLinearTransformArray.from_filename(
             f'{self.wf_dir}/bold_hmc_wf/fsl2itk/mat2itk.txt').to_ras()
@@ -206,9 +220,13 @@ class Interpolator(object):
         for i, nii_fn in enumerate(nii_fns):
             nii = nib.load(nii_fn)
             data = np.asarray(nii.dataobj)
-            data = spline_filter(data, order=3)
-            self.nii_data.append(data)
             self.nii_affines.append(nii.affine)
+            self.nii_data.append(data)
+
+        orders = [_ for _ in orders if _ > 1]
+        for order in orders:
+            if order not in self.filtered:
+                self._get_filtered_data(order)
 
         self.warp_data, self.warp_affines = [], []
         for i, warp_fn in enumerate(warp_fns):
@@ -216,18 +234,28 @@ class Interpolator(object):
             self.warp_data.append(np.asarray(warp_nii.dataobj))
             self.warp_affines.append(warp_nii.affine)
 
-    def interpolate_surface(self, lr, coords_type='normals_sine', standard_space=True):
-        hemi = self.surface_data[lr]
+    def _get_filtered_data(self, order):
+        if order > 1:
+            if order not in self.filtered:
+                self.filtered[order] = [spline_filter(_, order=order) for _ in self.nii_data]
+            return self.filtered[order]
+        return self.nii_data
+
+    def interpolate_surface(self, hemi, projection_type='normals_sine', standard_space=True, order=1):
+        data = self._get_filtered_data(order)
+        interp_kwargs = self.interp_kwargs.copy()
+        interp_kwargs['order'] = order
         interp = interpolate_original_space(
-            self.nii_data, self.nii_affines, hemi['coords_' + coords_type], hemi['shape'],
-            self.lta, self.ref_to_t1, self.hmc, self.warp_data, self.warp_affines)
+            data, self.nii_affines, getattr(hemi, 'coords_' + projection_type), hemi.shape,
+            self.lta, self.ref_to_t1, self.hmc, self.warp_data, self.warp_affines, interp_kwargs=interp_kwargs)
         if standard_space:
-            interp = interp @ hemi['sphere_T']
+            interp = interp @ hemi.to_fsavg
         return interp
 
-    def interpolate_volume(self):
+    def interpolate_volume(self, order=1):
+        data = self._get_filtered_data(order)
+        interp_kwargs = self.interp_kwargs.copy()
+        interp_kwargs['order'] = order
         interp = interpolate_original_space(
-            self.nii_data, self.nii_affines, self.vol_coords, self.vol_shape,
-            self.lta, self.ref_to_t1, self.hmc, self.warp_data, self.warp_affines)
-
-    # 2 hemispheres x 2 styles + 1 volume
+            data, self.nii_affines, self.vol_coords, self.vol_shape,
+            self.lta, self.ref_to_t1, self.hmc, self.warp_data, self.warp_affines, interp_kwargs=interp_kwargs)
