@@ -41,10 +41,6 @@ def compute_vertex_normals_equal_weight(coords, faces):
     return normals
 
 
-# def compute_projected_coordinates(white_coords, normals, thicknesses, frac):
-#     return white_coords + normals * (thicknesses[:, np.newaxis] * frac)
-
-
 def nnfr_transformation(source_sphere, target_sphere, reverse=True):
     ns = source_sphere.shape[0]
     nt = target_sphere.shape[0]
@@ -72,14 +68,6 @@ def nnfr_transformation(source_sphere, target_sphere, reverse=True):
     T = T @ sparse.diags(np.reciprocal(t_counts))
 
     return T
-
-
-# def compute_transformed_ijk(coords, c_ras, xfms):
-#     coords = coords + c_ras[np.newaxis]
-#     coords = np.concatenate([coords, np.ones(coords.shape[:-1] + (1, ), dtype=coords.dtype)], axis=1)
-#     for xfm in xfms:
-#         coords = coords @ xfm.T
-#     return coords
 
 
 def find_truncation_boundaries(brainmask, margin=2):
