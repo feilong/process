@@ -1,11 +1,13 @@
 import os
 from glob import glob
+from datetime import datetime
 import numpy as np
 import scipy.sparse as sparse
 from scipy.spatial import cKDTree
 from scipy.ndimage import map_coordinates, spline_filter
 import nibabel as nib
 import nitransforms as nt
+from joblib import Parallel, delayed
 
 from surface import Surface, barycentric_resample
 
@@ -322,6 +324,32 @@ class Interpolator(object):
             self.lta, self.ref_to_t1, self.hmc, self.warp_data, self.warp_affines, interp_kwargs=interp_kwargs)
 
 
+def workflow_single_run(label, sid, fs_dir, wf_root, out_dir, combinations, hemispheres):
+    label2 = label.replace('-', '_')
+    wf_dir = (f'{wf_root}/single_subject_{sid}_wf/func_preproc_{label2}_wf')
+    interpolator = Interpolator(sid, label, fs_dir, wf_dir)
+    interpolator.prepare(orders=[1])
+
+    for lr in 'lr':
+        for standard_space, from_t1, projection_type in combinations:
+            tag = '_'.join([standard_space, ('2step' if from_t1 else '1step'), projection_type])
+            out_fn = f'{out_dir}/{tag}/sub-{sid}_{label}.npy'
+            if os.path.exists(out_fn):
+                continue
+            os.makedirs(os.path.dirname(out_fn), exist_ok=True)
+
+            print(datetime.now(), label, lr, standard_space, from_t1, projection_type)
+            space = hemispheres[lr].native
+            resampled = interpolator.interpolate_surface(
+                space, projection_type, standard_space=standard_space, order=1, from_t1_space=from_t1)
+            np.save(out_fn, resampled)
+
+    out_fn = f'{out_dir}/average-volume/sub-{sid}_{label}.npy'
+    vol = np.mean(interpolator.interpolate_volume(), axis=0)
+    os.makedirs(os.path.dirname(out_fn), exist_ok=True)
+    np.save(out_fn, vol)
+
+
 def workflow(
         sid, bids_dir, fs_dir, wf_root, out_dir, tmpl_dir=os.path.expanduser('~/surface_template/lab/final'),
         combinations=[
@@ -334,6 +362,7 @@ def workflow(
             ('on-avg-1031-final_ico32', False, 'pial'),
             # TODO no-nnfr
         ],
+        n_jobs=1,
     ):
     raw_bolds = sorted(glob(f'{bids_dir}/sub-{sid}/ses-*/func/*_bold.nii.gz')) + \
         sorted(glob(f'{bids_dir}/sub-{sid}/func/*_bold.nii.gz'))
@@ -346,27 +375,11 @@ def workflow(
             npz_fn = f'{tmpl_dir}/{comb[0]}_{lr}h_sphere.npz'
             npz = np.load(npz_fn)
             hemispheres[lr].compute_transformation(npz_fn, comb[0])
-            hemispheres[lr].resample(comb[0], npz['coords'], npz['faces'])
-            hemispheres[lr].compute_coordinates(comb[0])
+            # hemispheres[lr].resample(comb[0], npz['coords'], npz['faces'])
+            # hemispheres[lr].compute_coordinates(comb[0])
 
-    for label in labels:
-        label2 = label.replace('-', '_')
-        wf_dir = (f'{wf_root}/single_subject_{sid}_wf/func_preproc_{label2}_wf')
-        interpolator = Interpolator(sid, label, fs_dir, wf_dir)
-        interpolator.prepare(orders=[1])
-
-        for lr in 'lr':
-            for standard_space, from_t1, projection_type in combinations:
-                print(label, lr, standard_space, from_t1, projection_type)
-                space = hemispheres[lr].native
-                tag = '_'.join([standard_space, ('2step' if from_t1 else '1step'), projection_type])
-                out_fn = f'{out_dir}/{tag}/sub-{sid}_{label}.npy'
-                resampled = interpolator.interpolate_surface(
-                    space, projection_type, standard_space=standard_space, order=1, from_t1_space=from_t1)
-                os.makedirs(os.path.dirname(out_fn), exist_ok=True)
-                np.save(out_fn, resampled)
-
-        out_fn = f'{out_dir}/average-volume/sub-{sid}_{label}.npy'
-        vol = np.mean(interpolator.interpolate_volume(), axis=0)
-        os.makedirs(os.path.dirname(out_fn), exist_ok=True)
-        np.save(out_fn, vol)
+    jobs = [
+        delayed(workflow_single_run)(label, sid, fs_dir, wf_root, out_dir, combinations, hemispheres)
+        for label in labels]
+    with Parallel(n_jobs=n_jobs) as parallel:
+        parallel(jobs)
