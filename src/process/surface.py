@@ -385,3 +385,14 @@ def workflow(
         for label in labels]
     with Parallel(n_jobs=n_jobs) as parallel:
         parallel(jobs)
+
+    brainmask = nib.load(f'{fs_dir}/sub-{sid}/mri/brainmask.mgz')
+    canonical = nib.as_closest_canonical(brainmask)
+    boundaries = find_truncation_boundaries(np.asarray(canonical.dataobj))
+    for key in ['T1', 'T2', 'brainmask', 'ribbon']:
+        out_fn = f'{out_dir}/average-volume/sub-{sid}_{key}.npy'
+        img = nib.load(f'{fs_dir}/sub-{sid}/mri/{key}.mgz')
+        canonical = nib.as_closest_canonical(img)
+        data = np.asarray(canonical.dataobj)
+        data = data[boundaries[0, 0]:boundaries[0, 1], boundaries[1, 0]:boundaries[1, 1], boundaries[2, 0]:boundaries[2, 1]]
+        np.save(out_fn, data)
