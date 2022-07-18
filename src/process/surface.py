@@ -6,6 +6,8 @@ from scipy.ndimage import map_coordinates, spline_filter
 import nibabel as nib
 import nitransforms as nt
 
+from surface import Surface, barycentric_resample
+
 
 def compute_vertex_normals_sine_weight(coords, faces):
     normals = np.zeros(coords.shape)
@@ -149,35 +151,65 @@ class Hemisphere(object):
         self.lr = lr
         self.fs_dir = fs_dir
 
+        self.spaces = []
+
         self.load_data()
         self.compute_coordinates()
         self.compute_transformation()
 
     def load_data(self):
-        self.white, self.faces = nib.freesurfer.io.read_geometry(f'{self.fs_dir}/sub-{self.sid}/surf/{self.lr}h.white')
-        self.pial = nib.freesurfer.io.read_geometry(f'{self.fs_dir}/sub-{self.sid}/surf/{self.lr}h.pial')[0]
-        self.thicknesses = nib.freesurfer.io.read_morph_data(f'{self.fs_dir}/sub-{self.sid}/surf/{self.lr}h.thickness')
+        native = {}
+        native['white'], native['faces'] = nib.freesurfer.io.read_geometry(f'{self.fs_dir}/sub-{self.sid}/surf/{self.lr}h.white')
+        native['pial'] = nib.freesurfer.io.read_geometry(f'{self.fs_dir}/sub-{self.sid}/surf/{self.lr}h.pial')[0]
+        native['thickness'] = nib.freesurfer.io.read_morph_data(f'{self.fs_dir}/sub-{self.sid}/surf/{self.lr}h.thickness')
+        native['sphere.reg'] = nib.freesurfer.io.read_geometry(f'{self.fs_dir}/sub-{self.sid}/surf/{self.lr}h.sphere.reg')[0]
+        native['name'] = 'native'
+        self.native = native
+        self.spaces.append('native')
+
         T1 = nib.load(f'{self.fs_dir}/sub-{self.sid}/mri/T1.mgz')
         self.c_ras = (np.array([_//2 for _ in T1.shape] + [1]) @ T1.affine.T)[:3]
 
-    def compute_coordinates(self):
-        self.normals_sine = compute_vertex_normals_sine_weight(self.white, self.faces)
-        self.normals_equal = compute_vertex_normals_equal_weight(self.white, self.faces)
+    def resample(self, space_name, new_coords, new_faces=None):
+        surface = Surface(self.native['sphere.reg'], self.native['faces'], is_sphere=True)
+        surface.compute_vecs_for_barycentric()
+        f_indices, weights = surface.compute_barycentric_weights(new_coords)
 
-        self.coords_normals_sine, self.shape = surface_coords_normal(
-            self.white, self.c_ras, self.normals_sine, self.thicknesses)
-        self.coords_normals_equal, shape = surface_coords_normal(
-            self.white, self.c_ras, self.normals_equal, self.thicknesses)
-        assert shape == self.shape
+        resampled = {}
+        for name in ['white', 'pial']:
+            new_values = self.native[name][surface.faces[f_indices]]
+            while len(weights.shape) < len(new_values.shape):
+                weights = weights[..., np.newaxis]
+            new_values = np.sum(new_values * weights, axis=1)
+            resampled[name] = new_values
 
-        self.coords_pial, shape = surface_coords_pial(
-            self.white, self.c_ras, self.pial)
-        assert shape == self.shape
+        if new_faces is not None:
+            resampled['faces'] = new_faces
+        resampled['name'] = space_name
+        setattr(self, space_name, resampled)
+        self.spaces.append(space_name)
+
+    def compute_coordinates(self, space_name='native'):
+        space = getattr(self, space_name)
+        if space_name == 'native':
+            space['normals_sine'] = compute_vertex_normals_sine_weight(space['white'], space['faces'])
+            space['normals_equal'] = compute_vertex_normals_equal_weight(space['white'], space['faces'])
+            space['coords_normals_sine'], space['shape'] = surface_coords_normal(
+                space['white'], self.c_ras, space['normals_sine'], space['thickness'])
+            space['coords_normals_equal'], shape = surface_coords_normal(
+                space['white'], self.c_ras, space['normals_equal'], space['thickness'])
+            assert shape == space['shape']
+
+        space['coords_pial'], shape = surface_coords_pial(
+            space['white'], self.c_ras, space['pial'])
+        if 'shape' in space:
+            assert shape == space['shape']
+        else:
+            space['shape'] = shape
 
     def compute_transformation(self):
-        self.native_sphere = nib.freesurfer.io.read_geometry(f'{self.fs_dir}/sub-{self.sid}/surf/{self.lr}h.sphere.reg')[0]
         self.fsavg_sphere = nib.freesurfer.io.read_geometry(f'{self.fs_dir}/fsaverage/surf/{self.lr}h.sphere.reg')[0]
-        self.to_fsavg = nnfr_transformation(self.native_sphere, self.fsavg_sphere)
+        self.native['to_fsavg'] = nnfr_transformation(self.native['sphere.reg'], self.fsavg_sphere)
 
 
 class Interpolator(object):
@@ -229,15 +261,15 @@ class Interpolator(object):
             return self.filtered[order]
         return self.nii_data
 
-    def interpolate_surface(self, hemi, projection_type='normals_sine', standard_space=True, order=1):
+    def interpolate_surface(self, space, projection_type='normals_sine', standard_space=True, order=1):
         data = self._get_filtered_data(order)
         interp_kwargs = self.interp_kwargs.copy()
         interp_kwargs['order'] = order
         interp = interpolate_original_space(
-            data, self.nii_affines, getattr(hemi, 'coords_' + projection_type), hemi.shape,
+            data, self.nii_affines, space['coords_' + projection_type], space['shape'],
             self.lta, self.ref_to_t1, self.hmc, self.warp_data, self.warp_affines, interp_kwargs=interp_kwargs)
         if standard_space:
-            interp = interp @ hemi.to_fsavg
+            interp = interp @ space['to_fsavg']
         return interp
 
     def interpolate_volume(self, order=1):
