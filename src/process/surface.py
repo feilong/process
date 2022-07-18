@@ -1,3 +1,4 @@
+import os
 from glob import glob
 import numpy as np
 import scipy.sparse as sparse
@@ -168,7 +169,7 @@ class Hemisphere(object):
 
         self.load_data()
         self.compute_coordinates()
-        self.compute_transformation()
+        # self.compute_transformation()
 
     def load_data(self):
         native = {}
@@ -177,6 +178,8 @@ class Hemisphere(object):
         native['thickness'] = nib.freesurfer.io.read_morph_data(f'{self.fs_dir}/sub-{self.sid}/surf/{self.lr}h.thickness')
         native['sphere.reg'] = nib.freesurfer.io.read_geometry(f'{self.fs_dir}/sub-{self.sid}/surf/{self.lr}h.sphere.reg')[0]
         native['name'] = 'native'
+        for key in ['white', 'pial', 'thickness', 'sphere.reg']:
+            native[key] = native[key].astype(np.float64)
         self.native = native
         self.spaces.append('native')
 
@@ -220,9 +223,13 @@ class Hemisphere(object):
         else:
             space['shape'] = shape
 
-    def compute_transformation(self):
-        self.fsavg_sphere = nib.freesurfer.io.read_geometry(f'{self.fs_dir}/fsaverage/surf/{self.lr}h.sphere.reg')[0]
-        self.native['to_fsavg'] = nnfr_transformation(self.native['sphere.reg'], self.fsavg_sphere)
+    def compute_transformation(self, sphere_fn, name):
+        if f'to_{name}' in self.native:
+            return
+        setattr(self, f'{name}_sphere', np.load(sphere_fn)['coords'])
+        self.native[f'to_{name}'] = nnfr_transformation(
+            self.native['sphere.reg'] / np.linalg.norm(self.native['sphere.reg'], axis=1, keepdims=True),
+            getattr(self, f'{name}_sphere'))
 
 
 class Interpolator(object):
@@ -289,7 +296,7 @@ class Interpolator(object):
             return self.filtered_t1_space[order]
         return self.nii_t1
 
-    def interpolate_surface(self, space, projection_type='normals_sine', standard_space=True, order=1, from_t1_space=False):
+    def interpolate_surface(self, space, projection_type='normals_sine', standard_space=None, order=1, from_t1_space=False):
         interp_kwargs = self.interp_kwargs.copy()
         interp_kwargs['order'] = order
         if from_t1_space:
@@ -302,8 +309,8 @@ class Interpolator(object):
             interp = interpolate_original_space(
                 data, self.nii_affines, space['coords_' + projection_type], space['shape'],
                 self.lta, self.ref_to_t1, self.hmc, self.warp_data, self.warp_affines, interp_kwargs=interp_kwargs)
-        if standard_space:
-            interp = interp @ space['to_fsavg']
+        if standard_space is not None and space['name'] != standard_space:
+            interp = interp @ space[f'to_{standard_space}']
         return interp
 
     def interpolate_volume(self, order=1):
@@ -313,3 +320,53 @@ class Interpolator(object):
         interp = interpolate_original_space(
             data, self.nii_affines, self.vol_coords, self.vol_shape,
             self.lta, self.ref_to_t1, self.hmc, self.warp_data, self.warp_affines, interp_kwargs=interp_kwargs)
+
+
+def workflow(
+        sid, bids_dir, fs_dir, wf_root, out_dir, tmpl_dir=os.path.expanduser('~/surface_template/lab/final'),
+        combinations=[
+            ('fsaverage_ico32', True, 'normals_sine'),
+            ('fsaverage_ico32', True, 'normals_equal'),
+            ('fsaverage_ico32', True, 'pial'),
+            ('fsaverage_ico32', False, 'pial'),
+            ('on-avg-1031-final_ico32', True, 'normals_equal'),
+            ('on-avg-1031-final_ico32', True, 'pial'),
+            ('on-avg-1031-final_ico32', False, 'pial'),
+            # TODO no-nnfr
+        ],
+    ):
+    raw_bolds = sorted(glob(f'{bids_dir}/sub-{sid}/ses-*/func/*_bold.nii.gz')) + \
+        sorted(glob(f'{bids_dir}/sub-{sid}/func/*_bold.nii.gz'))
+    labels = [os.path.basename(_).split(f'sub-{sid}_', 1)[1].rsplit('_bold.nii.gz', 1)[0] for _ in raw_bolds]
+
+    hemispheres = {}
+    for lr in 'lr':
+        hemispheres[lr] = Hemisphere(sid, lr, fs_dir)
+        for comb in combinations:
+            npz_fn = f'{tmpl_dir}/{comb[0]}_{lr}h_sphere.npz'
+            npz = np.load(npz_fn)
+            hemispheres[lr].compute_transformation(npz_fn, comb[0])
+            hemispheres[lr].resample(comb[0], npz['coords'], npz['faces'])
+            hemispheres[lr].compute_coordinates(comb[0])
+
+    for label in labels:
+        label2 = label.replace('-', '_')
+        wf_dir = (f'{wf_root}/single_subject_{sid}_wf/func_preproc_{label2}_wf')
+        interpolator = Interpolator(sid, label, fs_dir, wf_dir)
+        interpolator.prepare(orders=[1])
+
+        for lr in 'lr':
+            for standard_space, from_t1, projection_type in combinations:
+                print(label, lr, standard_space, from_t1, projection_type)
+                space = hemispheres[lr].native
+                tag = '_'.join([standard_space, ('2step' if from_t1 else '1step'), projection_type])
+                out_fn = f'{out_dir}/{tag}/sub-{sid}_{label}.npy'
+                resampled = interpolator.interpolate_surface(
+                    space, projection_type, standard_space=standard_space, order=1, from_t1_space=from_t1)
+                os.makedirs(os.path.dirname(out_fn), exist_ok=True)
+                np.save(out_fn, resampled)
+
+        out_fn = f'{out_dir}/average-volume/sub-{sid}_{label}.npy'
+        vol = np.mean(interpolator.interpolate_volume(), axis=0)
+        os.makedirs(os.path.dirname(out_fn), exist_ok=True)
+        np.save(out_fn, vol)
