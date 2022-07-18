@@ -322,6 +322,7 @@ class Interpolator(object):
         interp = interpolate_original_space(
             data, self.nii_affines, self.vol_coords, self.vol_shape,
             self.lta, self.ref_to_t1, self.hmc, self.warp_data, self.warp_affines, interp_kwargs=interp_kwargs)
+        return interp
 
 
 def workflow_single_run(label, sid, fs_dir, wf_root, out_dir, combinations, hemispheres):
@@ -345,9 +346,10 @@ def workflow_single_run(label, sid, fs_dir, wf_root, out_dir, combinations, hemi
             np.save(out_fn, resampled)
 
     out_fn = f'{out_dir}/average-volume/sub-{sid}_{label}.npy'
-    vol = np.mean(interpolator.interpolate_volume(), axis=0)
-    os.makedirs(os.path.dirname(out_fn), exist_ok=True)
-    np.save(out_fn, vol)
+    if not os.path.exists(out_fn):
+        vol = np.mean(interpolator.interpolate_volume(), axis=0)
+        os.makedirs(os.path.dirname(out_fn), exist_ok=True)
+        np.save(out_fn, vol)
 
 
 def workflow(
