@@ -145,6 +145,19 @@ def interpolate_original_space(nii_data, nii_affines, coords, shape, lta, ref_to
     return interps
 
 
+def interpolate_t1_space(nii_t1, nii_t1_affine, coords, shape, lta, interp_kwargs={'order': 3, 'prefilter': False, 'cval': np.nan}):
+    cc = coords @ (lta.T @ np.linalg.inv(nii_t1_affine.T))
+    interps = []
+    for data in nii_t1:
+        interp = map_coordinates(data, cc.T[:3], **interp_kwargs).reshape(shape)
+        if len(interp.shape) == 2:
+            interp = np.nanmean(interp, axis=1)
+        interps.append(interp)
+    interps = np.stack(interps, axis=0)
+
+    return interps
+
+
 class Hemisphere(object):
     def __init__(self, sid, lr, fs_dir):
         self.sid = sid
@@ -220,6 +233,7 @@ class Interpolator(object):
         self.wf_dir = wf_dir
         self.interp_kwargs = {'order': 3, 'prefilter': False, 'cval': np.nan}
         self.filtered = {}
+        self.filtered_t1_space = {}
 
     def prepare(self, orders=[]):
         self.brainmask = nib.load(f'{self.fs_dir}/sub-{self.sid}/mri/brainmask.mgz')
@@ -236,6 +250,11 @@ class Interpolator(object):
         warp_fns = sorted(glob(f'{self.wf_dir}/unwarp_wf/resample/vol*_xfm.nii.gz'))
         assert len(nii_fns) == len(warp_fns)
 
+        nii = nib.load(f'{self.wf_dir}/bold_t1_trans_wf/merge/vol0000_xform-00000_clipped_merged.nii')
+        self.nii_t1 = np.asarray(nii.dataobj)
+        self.nii_t1 = [self.nii_t1[..., _] for _ in range(self.nii_t1.shape[-1])]
+        self.nii_t1_affine = nii.affine
+
         self.nii_data, self.nii_affines = [], []
         for i, nii_fn in enumerate(nii_fns):
             nii = nib.load(nii_fn)
@@ -247,6 +266,8 @@ class Interpolator(object):
         for order in orders:
             if order not in self.filtered:
                 self._get_filtered_data(order)
+            if order not in self.filtered_t1_space:
+                self._get_filtered_data_t1_space(order)
 
         self.warp_data, self.warp_affines = [], []
         for i, warp_fn in enumerate(warp_fns):
@@ -261,13 +282,26 @@ class Interpolator(object):
             return self.filtered[order]
         return self.nii_data
 
-    def interpolate_surface(self, space, projection_type='normals_sine', standard_space=True, order=1):
-        data = self._get_filtered_data(order)
+    def _get_filtered_data_t1_space(self, order):
+        if order > 1:
+            if order not in self.filtered_t1_space:
+                self.filtered_t1_space[order] = [spline_filter(_, order=order) for _ in self.nii_t1]
+            return self.filtered_t1_space[order]
+        return self.nii_t1
+
+    def interpolate_surface(self, space, projection_type='normals_sine', standard_space=True, order=1, from_t1_space=False):
         interp_kwargs = self.interp_kwargs.copy()
         interp_kwargs['order'] = order
-        interp = interpolate_original_space(
-            data, self.nii_affines, space['coords_' + projection_type], space['shape'],
-            self.lta, self.ref_to_t1, self.hmc, self.warp_data, self.warp_affines, interp_kwargs=interp_kwargs)
+        if from_t1_space:
+            data = self._get_filtered_data_t1_space(order)
+            interp = interpolate_t1_space(
+                data, self.nii_t1_affine, space['coords_' + projection_type], space['shape'],
+                self.lta, interp_kwargs=interp_kwargs)
+        else:
+            data = self._get_filtered_data(order)
+            interp = interpolate_original_space(
+                data, self.nii_affines, space['coords_' + projection_type], space['shape'],
+                self.lta, self.ref_to_t1, self.hmc, self.warp_data, self.warp_affines, interp_kwargs=interp_kwargs)
         if standard_space:
             interp = interp @ space['to_fsavg']
         return interp
