@@ -175,17 +175,17 @@ class Hemisphere(object):
 
     def load_data(self):
         native = {}
-        native['white'], native['faces'] = nib.freesurfer.io.read_geometry(f'{self.fs_dir}/sub-{self.sid}/surf/{self.lr}h.white')
-        native['pial'] = nib.freesurfer.io.read_geometry(f'{self.fs_dir}/sub-{self.sid}/surf/{self.lr}h.pial')[0]
-        native['thickness'] = nib.freesurfer.io.read_morph_data(f'{self.fs_dir}/sub-{self.sid}/surf/{self.lr}h.thickness')
-        native['sphere.reg'] = nib.freesurfer.io.read_geometry(f'{self.fs_dir}/sub-{self.sid}/surf/{self.lr}h.sphere.reg')[0]
+        native['white'], native['faces'] = nib.freesurfer.io.read_geometry(f'{self.fs_dir}/surf/{self.lr}h.white')
+        native['pial'] = nib.freesurfer.io.read_geometry(f'{self.fs_dir}/surf/{self.lr}h.pial')[0]
+        native['thickness'] = nib.freesurfer.io.read_morph_data(f'{self.fs_dir}/surf/{self.lr}h.thickness')
+        native['sphere.reg'] = nib.freesurfer.io.read_geometry(f'{self.fs_dir}/surf/{self.lr}h.sphere.reg')[0]
         native['name'] = 'native'
         for key in ['white', 'pial', 'thickness', 'sphere.reg']:
             native[key] = native[key].astype(np.float64)
         self.native = native
         self.spaces.append('native')
 
-        T1 = nib.load(f'{self.fs_dir}/sub-{self.sid}/mri/T1.mgz')
+        T1 = nib.load(f'{self.fs_dir}/mri/T1.mgz')
         self.c_ras = (np.array([_//2 for _ in T1.shape] + [1]) @ T1.affine.T)[:3]
 
     def resample(self, space_name, new_coords, new_faces=None):
@@ -245,7 +245,7 @@ class Interpolator(object):
         self.filtered_t1_space = {}
 
     def prepare(self, orders=[]):
-        self.brainmask = nib.load(f'{self.fs_dir}/sub-{self.sid}/mri/brainmask.mgz')
+        self.brainmask = nib.load(f'{self.fs_dir}/mri/brainmask.mgz')
         self.vol_coords, self.vol_shape = canonical_volume_coords(self.brainmask, margin=2)
 
         self.hmc = nt.io.itk.ITKLinearTransformArray.from_filename(
@@ -327,17 +327,21 @@ class Interpolator(object):
 
 def workflow_single_run(label, sid, fs_dir, wf_root, out_dir, combinations, hemispheres):
     label2 = label.replace('-', '_')
-    wf_dir = (f'{wf_root}/single_subject_{sid}_wf/func_preproc_{label2}_wf')
-    interpolator = Interpolator(sid, label, fs_dir, wf_dir)
-    interpolator.prepare(orders=[1])
+    wf_dir = (f'{wf_root}/func_preproc_{label2}_wf')
+    interpolator = None
 
     for lr in 'lr':
         for standard_space, from_t1, projection_type in combinations:
             tag = '_'.join([standard_space, ('2step' if from_t1 else '1step'), projection_type])
-            out_fn = f'{out_dir}/{tag}/sub-{sid}_{label}.npy'
+            out_fn = f'{out_dir}/{tag}/sub-{sid}_{label}_{lr}h.npy'
             if os.path.exists(out_fn):
                 continue
+            print(out_fn)
             os.makedirs(os.path.dirname(out_fn), exist_ok=True)
+
+            if interpolator is None:
+                interpolator = Interpolator(sid, label, fs_dir, wf_dir)
+                interpolator.prepare(orders=[1])
 
             print(datetime.now(), label, lr, standard_space, from_t1, projection_type)
             space = hemispheres[lr].native
@@ -347,12 +351,15 @@ def workflow_single_run(label, sid, fs_dir, wf_root, out_dir, combinations, hemi
 
     out_fn = f'{out_dir}/average-volume/sub-{sid}_{label}.npy'
     if not os.path.exists(out_fn):
+        if interpolator is None:
+            interpolator = Interpolator(sid, label, fs_dir, wf_dir)
+            interpolator.prepare(orders=[1])
         vol = np.mean(interpolator.interpolate_volume(), axis=0)
         os.makedirs(os.path.dirname(out_fn), exist_ok=True)
         np.save(out_fn, vol)
 
 
-def workflow(
+def resample_workflow(
         sid, bids_dir, fs_dir, wf_root, out_dir, tmpl_dir=os.path.expanduser('~/surface_template/lab/final'),
         combinations=[
             ('fsaverage_ico32', True, 'normals_sine'),
@@ -386,12 +393,12 @@ def workflow(
     with Parallel(n_jobs=n_jobs) as parallel:
         parallel(jobs)
 
-    brainmask = nib.load(f'{fs_dir}/sub-{sid}/mri/brainmask.mgz')
+    brainmask = nib.load(f'{fs_dir}/mri/brainmask.mgz')
     canonical = nib.as_closest_canonical(brainmask)
     boundaries = find_truncation_boundaries(np.asarray(canonical.dataobj))
     for key in ['T1', 'T2', 'brainmask', 'ribbon']:
         out_fn = f'{out_dir}/average-volume/sub-{sid}_{key}.npy'
-        img = nib.load(f'{fs_dir}/sub-{sid}/mri/{key}.mgz')
+        img = nib.load(f'{fs_dir}/mri/{key}.mgz')
         canonical = nib.as_closest_canonical(img)
         data = np.asarray(canonical.dataobj)
         data = data[boundaries[0, 0]:boundaries[0, 1], boundaries[1, 0]:boundaries[1, 1], boundaries[2, 0]:boundaries[2, 1]]
