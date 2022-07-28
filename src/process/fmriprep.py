@@ -4,6 +4,7 @@ import shutil
 from glob import glob
 
 from process.compression import copy_files_to_lzma_tar
+from process.surface import resample_workflow
 
 
 def fmriprep_cmd(config):
@@ -31,6 +32,7 @@ def run_fmriprep(config, cleanup=True):
     freesurfer_dir = os.path.join(config['output_root'], 'freesurfer')
     summary_dir = os.path.join(config['output_root'], 'summary')
     confounds_dir = os.path.join(config['output_root'], 'confounds')
+    resample_dir = os.path.join(config['output_root'], 'resampled')
     for dir_name in [log_dir, fmriprep_dir, freesurfer_dir, summary_dir, confounds_dir]:
         os.makedirs(dir_name, exist_ok=True)
 
@@ -47,13 +49,14 @@ def run_fmriprep(config, cleanup=True):
     freesurfer_fn = os.path.join(freesurfer_dir, f'{sid}.tar.lzma')
     summary_fn = os.path.join(summary_dir, f'{sid}.tar.lzma')
     confounds_fn = os.path.join(confounds_dir, f'{sid}.tar.lzma')
-    if all([os.path.exists(_) for _ in [fmriprep_fn, freesurfer_fn, summary_fn, confounds_fn]]):
+    if all([os.path.exists(_) for _ in [fmriprep_fn, freesurfer_fn, summary_fn, confounds_fn, resample_dir]]):
         return
 
     fmriprep_out = os.path.join(config['fmriprep_out'], f'sub-{sid}')
     freesurfer_out = os.path.join(config['fmriprep_out'], 'sourcedata', 'freesurfer', f'sub-{sid}')
     major, minor = config['fmriprep_version'].split('.')[:2]
-    work_out = os.path.join(config['fmriprep_work'], f'fmriprep_{major}_{minor}_wf', f'single_subject_{sid}_wf')
+    # work_out = os.path.join(config['fmriprep_work'], f'fmriprep_{major}_{minor}_wf', f'single_subject_{sid}_wf')
+    work_out = os.path.join(config['fmriprep_work'], f'fmriprep_wf', f'single_subject_{sid}_wf')
 
     if not all([os.path.exists(_) for _ in [fmriprep_out, freesurfer_out, work_out]]):
         cmd = fmriprep_cmd(config)
@@ -66,6 +69,10 @@ def run_fmriprep(config, cleanup=True):
             print(cmd)
             print(config['dset'], sid, proc.returncode)
             return
+
+    resample_workflow(
+        sid=sid, bids_dir=config['bids_dir'], fs_dir=freesurfer_out, wf_root=work_out, out_dir=resample_dir,
+        n_jobs=config['n_procs'])
 
     copy_files_to_lzma_tar(
         fmriprep_fn,

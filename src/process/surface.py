@@ -257,7 +257,8 @@ class Interpolator(object):
 
         nii_fns = sorted(glob(f'{self.wf_dir}/bold_split/vol*.nii.gz'))
         warp_fns = sorted(glob(f'{self.wf_dir}/unwarp_wf/resample/vol*_xfm.nii.gz'))
-        assert len(nii_fns) == len(warp_fns)
+        if len(warp_fns):
+            assert len(nii_fns) == len(warp_fns)
 
         nii = nib.load(f'{self.wf_dir}/bold_t1_trans_wf/merge/vol0000_xform-00000_clipped_merged.nii')
         self.nii_t1 = np.asarray(nii.dataobj)
@@ -278,11 +279,14 @@ class Interpolator(object):
             if order not in self.filtered_t1_space:
                 self._get_filtered_data_t1_space(order)
 
-        self.warp_data, self.warp_affines = [], []
-        for i, warp_fn in enumerate(warp_fns):
-            warp_nii = nib.load(warp_fn)
-            self.warp_data.append(np.asarray(warp_nii.dataobj))
-            self.warp_affines.append(warp_nii.affine)
+        if len(warp_fns):
+            self.warp_data, self.warp_affines = [], []
+            for i, warp_fn in enumerate(warp_fns):
+                warp_nii = nib.load(warp_fn)
+                self.warp_data.append(np.asarray(warp_nii.dataobj))
+                self.warp_affines.append(warp_nii.affine)
+        else:
+            self.warp_data, self.warp_affines = None, None
 
     def _get_filtered_data(self, order):
         if order > 1:
@@ -328,6 +332,8 @@ class Interpolator(object):
 def workflow_single_run(label, sid, fs_dir, wf_root, out_dir, combinations, hemispheres):
     label2 = label.replace('-', '_')
     wf_dir = (f'{wf_root}/func_preproc_{label2}_wf')
+    if not os.path.exists(wf_dir):
+        return
     interpolator = None
 
     for lr in 'lr':
