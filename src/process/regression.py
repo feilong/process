@@ -54,11 +54,11 @@ def regression_workflow_single_run(fn, out_fn, conf_buffer, ignore_non_existing=
     np.save(out_fn, ds)
 
 
-def regression_workflow(config, out_dir, rename_func, n_jobs=1, resample_flavor=None, ignore_non_existing=False):
+def regression_workflow(config, out_dir, rename_func, space, resample_flavor, n_jobs=1, ignore_non_existing=False):
     if resample_flavor is None:
         resample_flavor = config['resample_flavor']
     sid = config['sid']
-    resample_dir = os.path.join(config['output_root'], 'resampled', resample_flavor)
+    resample_dir = os.path.join(config['output_root'], 'resampled', space, resample_flavor)
     fns = sorted(glob(os.path.join(resample_dir, f'sub-{sid}*.npy')))
     # print(sid, len(fns))
     os.makedirs(out_dir, exist_ok=True)

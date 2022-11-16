@@ -72,7 +72,7 @@ def run_fmriprep(config, cleanup=True):
 
     resample_workflow(
         sid=sid, bids_dir=config['bids_dir'], fs_dir=freesurfer_out, wf_root=work_out, out_dir=resample_dir,
-        n_jobs=config['n_procs'])
+        n_jobs=config['n_procs'], combinations=config['combinations'])
 
     copy_files_to_lzma_tar(
         fmriprep_fn,

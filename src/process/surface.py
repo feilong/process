@@ -10,6 +10,7 @@ import nitransforms as nt
 from joblib import Parallel, delayed
 
 from surface import Surface, barycentric_resample
+from surface.mapping import compute_transformation
 
 
 def compute_vertex_normals_sine_weight(coords, faces):
@@ -75,6 +76,13 @@ def nnfr_transformation(source_sphere, target_sphere, reverse=True):
     return T
 
 
+def vertex_area_transformation(source_sphere, source_faces, target_sphere, source_mid):
+    T = compute_transformation(
+        source_sphere, source_faces, target_sphere, source_mid)
+    T = sparse.diags(np.reciprocal(T.sum(axis=1).A.ravel())) @ T
+    return T
+
+
 def find_truncation_boundaries(brainmask, margin=2):
     boundaries = np.zeros((3, 2), dtype=int)
     for dim in range(3):
@@ -126,7 +134,8 @@ def surface_coords_pial(white_coords, c_ras, pial_coords, fracs=np.linspace(0, 1
     return coords, shape
 
 
-def interpolate_original_space(nii_data, nii_affines, coords, shape, lta, ref_to_t1, hmc, warp_data=None, warp_affines=None, interp_kwargs={'order': 3, 'prefilter': False, 'cval': np.nan}):
+def interpolate_original_space(nii_data, nii_affines, coords, shape, lta, ref_to_t1, hmc,
+        warp_data=None, warp_affines=None, interp_kwargs={'order': 3, 'prefilter': False, 'cval': np.nan}):
     coords = coords @ (lta.T @ ref_to_t1.T)
     interps = []
     for i, (data, affine) in enumerate(zip(nii_data, nii_affines)):
@@ -177,6 +186,7 @@ class Hemisphere(object):
         native = {}
         native['white'], native['faces'] = nib.freesurfer.io.read_geometry(f'{self.fs_dir}/surf/{self.lr}h.white')
         native['pial'] = nib.freesurfer.io.read_geometry(f'{self.fs_dir}/surf/{self.lr}h.pial')[0]
+        native['midthickness'] = nib.freesurfer.io.read_geometry(f'{self.fs_dir}/surf/{self.lr}h.midthickness')[0]
         native['thickness'] = nib.freesurfer.io.read_morph_data(f'{self.fs_dir}/surf/{self.lr}h.thickness')
         native['sphere.reg'] = nib.freesurfer.io.read_geometry(f'{self.fs_dir}/surf/{self.lr}h.sphere.reg')[0]
         native['name'] = 'native'
@@ -226,12 +236,17 @@ class Hemisphere(object):
             space['shape'] = shape
 
     def compute_transformation(self, sphere_fn, name):
-        if f'to_{name}' in self.native:
+        if all([f'to_{name}_{method}' in self.native for method in ['nnfr', 'area']]):
             return
         setattr(self, f'{name}_sphere', np.load(sphere_fn)['coords'])
-        self.native[f'to_{name}'] = nnfr_transformation(
+        self.native[f'to_{name}_nnfr'] = nnfr_transformation(
             self.native['sphere.reg'] / np.linalg.norm(self.native['sphere.reg'], axis=1, keepdims=True),
             getattr(self, f'{name}_sphere'))
+        self.native[f'to_{name}_area'] = vertex_area_transformation(
+            self.native['sphere.reg'] / np.linalg.norm(self.native['sphere.reg'], axis=1, keepdims=True),
+            self.native['faces'],
+            getattr(self, f'{name}_sphere'),
+            self.native['midthickness'])
 
 
 class Interpolator(object):
@@ -302,7 +317,7 @@ class Interpolator(object):
             return self.filtered_t1_space[order]
         return self.nii_t1
 
-    def interpolate_surface(self, space, projection_type='normals_sine', standard_space=None, order=1, from_t1_space=False):
+    def interpolate_surface(self, space, projection_type='normals_sine', standard_space=None, order=1, from_t1_space=False, resample_method='nnfr'):
         interp_kwargs = self.interp_kwargs.copy()
         interp_kwargs['order'] = order
         if from_t1_space:
@@ -316,7 +331,7 @@ class Interpolator(object):
                 data, self.nii_affines, space['coords_' + projection_type], space['shape'],
                 self.lta, self.ref_to_t1, self.hmc, self.warp_data, self.warp_affines, interp_kwargs=interp_kwargs)
         if standard_space is not None and space['name'] != standard_space:
-            interp = interp @ space[f'to_{standard_space}']
+            interp = interp @ space[f'to_{standard_space}_{resample_method}']
         return interp
 
     def interpolate_volume(self, order=1):
@@ -337,9 +352,9 @@ def workflow_single_run(label, sid, fs_dir, wf_root, out_dir, combinations, hemi
     interpolator = None
 
     for lr in 'lr':
-        for standard_space, from_t1, projection_type in combinations:
-            tag = '_'.join([standard_space, ('2step' if from_t1 else '1step'), projection_type])
-            out_fn = f'{out_dir}/{tag}/sub-{sid}_{label}_{lr}h.npy'
+        for standard_space, from_t1, projection_type, resample_method in combinations:
+            tag = '_'.join([('2step' if from_t1 else '1step'), projection_type, resample_method])
+            out_fn = f'{out_dir}/{standard_space}/{tag}/sub-{sid}_{label}_{lr}h.npy'
             if os.path.exists(out_fn):
                 continue
             print(out_fn)
@@ -352,7 +367,8 @@ def workflow_single_run(label, sid, fs_dir, wf_root, out_dir, combinations, hemi
             print(datetime.now(), label, lr, standard_space, from_t1, projection_type)
             space = hemispheres[lr].native
             resampled = interpolator.interpolate_surface(
-                space, projection_type, standard_space=standard_space, order=1, from_t1_space=from_t1)
+                space, projection_type, standard_space=standard_space, order=1, from_t1_space=from_t1,
+                resample_method=resample_method)
             np.save(out_fn, resampled)
 
     out_fn = f'{out_dir}/average-volume/sub-{sid}_{label}.npy'
@@ -368,14 +384,21 @@ def workflow_single_run(label, sid, fs_dir, wf_root, out_dir, combinations, hemi
 def resample_workflow(
         sid, bids_dir, fs_dir, wf_root, out_dir, tmpl_dir=os.path.expanduser('~/surface_template/lab/final'),
         combinations=[
-            ('fsaverage_ico32', True, 'normals_sine'),
-            ('fsaverage_ico32', True, 'normals_equal'),
-            ('fsaverage_ico32', True, 'pial'),
-            ('fsaverage_ico32', False, 'pial'),
-            ('on-avg-1031-final_ico32', True, 'normals_equal'),
-            ('on-avg-1031-final_ico32', True, 'pial'),
-            ('on-avg-1031-final_ico32', False, 'pial'),
-            # TODO no-nnfr
+            ('fsavg-ico32', False, 'normals_equal', 'nnfr'),
+            ('fslr-ico32', False, 'normals_equal', 'nnfr'),
+            ('onavg-ico32', False, 'normals_equal', 'nnfr'),
+
+            ('fsavg-ico64', False, 'normals_equal', 'nnfr'),
+            ('fslr-ico64', False, 'normals_equal', 'nnfr'),
+            ('onavg-ico64', False, 'normals_equal', 'nnfr'),
+
+            ('onavg-ico64', True, 'normals_equal', 'nnfr'),
+            ('onavg-ico64', False, 'pial', 'nnfr'),
+            ('onavg-ico64', True, 'pial', 'nnfr'),
+            ('onavg-ico64', False, 'normals_equal', 'area'),
+            ('onavg-ico64', True, 'normals_equal', 'area'),
+            ('onavg-ico64', False, 'pial', 'area'),
+            ('onavg-ico64', True, 'pial', 'area'),
         ],
         n_jobs=1,
     ):
@@ -387,7 +410,14 @@ def resample_workflow(
     for lr in 'lr':
         hemispheres[lr] = Hemisphere(sid, lr, fs_dir)
         for comb in combinations:
-            npz_fn = f'{tmpl_dir}/{comb[0]}_{lr}h_sphere.npz'
+            a, b = comb[0].split('-')
+            if a == 'fsavg':
+                name = 'fsaverage_' + b
+            elif a == 'onavg':
+                name = 'on-avg-1031-final_' + b
+            else:
+                name = comb[0]
+            npz_fn = f'{tmpl_dir}/{name}_{lr}h_sphere.npz'
             npz = np.load(npz_fn)
             hemispheres[lr].compute_transformation(npz_fn, comb[0])
             # hemispheres[lr].resample(comb[0], npz['coords'], npz['faces'])
