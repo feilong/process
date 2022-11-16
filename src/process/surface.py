@@ -384,27 +384,21 @@ def workflow_single_run(label, sid, fs_dir, wf_root, out_dir, combinations, hemi
 def resample_workflow(
         sid, bids_dir, fs_dir, wf_root, out_dir, tmpl_dir=os.path.expanduser('~/surface_template/lab/final'),
         combinations=[
-            ('fsavg-ico32', False, 'normals_equal', 'nnfr'),
-            ('fslr-ico32', False, 'normals_equal', 'nnfr'),
-            ('onavg-ico32', False, 'normals_equal', 'nnfr'),
-
-            ('fsavg-ico64', False, 'normals_equal', 'nnfr'),
-            ('fslr-ico64', False, 'normals_equal', 'nnfr'),
-            ('onavg-ico64', False, 'normals_equal', 'nnfr'),
-
-            ('onavg-ico64', True, 'normals_equal', 'nnfr'),
-            ('onavg-ico64', False, 'pial', 'nnfr'),
-            ('onavg-ico64', True, 'pial', 'nnfr'),
-            ('onavg-ico64', False, 'normals_equal', 'area'),
-            ('onavg-ico64', True, 'normals_equal', 'area'),
-            ('onavg-ico64', False, 'pial', 'area'),
-            ('onavg-ico64', True, 'pial', 'area'),
+            ('onavg-ico32', '1step_pial_area'),
         ],
         n_jobs=1,
     ):
     raw_bolds = sorted(glob(f'{bids_dir}/sub-{sid}/ses-*/func/*_bold.nii.gz')) + \
         sorted(glob(f'{bids_dir}/sub-{sid}/func/*_bold.nii.gz'))
     labels = [os.path.basename(_).split(f'sub-{sid}_', 1)[1].rsplit('_bold.nii.gz', 1)[0] for _ in raw_bolds]
+
+    new_combinations = []
+    for a, b in combinations:
+        b, c = b.split('_', 1)
+        c, d = c.rsplit('_', 1)
+        b = {'1step': False, '2step': True}[b]
+        new_combinations.append([a, b, c, d])
+    combinations = new_combinations
 
     hemispheres = {}
     for lr in 'lr':
