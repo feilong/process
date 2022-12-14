@@ -64,7 +64,9 @@ def run_fmriprep(config, cleanup=True):
         stderr_fn = os.path.join(log_dir, f'{sid}_fmriprep_stderr.txt')
         with open(stdout_fn, 'w') as f1, open(stderr_fn, 'w') as f2:
             proc = subprocess.run(cmd, stdout=f1, stderr=f2)
-        if proc.returncode != 0:
+        with open(stdout_fn, 'r') as f:
+            content = f.read()
+        if proc.returncode != 0 and 'fMRIPrep finished successfully!' not in content:
             print(config)
             print(cmd)
             print(config['dset'], sid, proc.returncode)
