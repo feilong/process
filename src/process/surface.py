@@ -196,7 +196,7 @@ class Hemisphere(object):
         self.spaces.append('native')
 
         T1 = nib.load(f'{self.fs_dir}/mri/T1.mgz')
-        self.c_ras = (np.array([_//2 for _ in T1.shape] + [1]) @ T1.affine.T)[:3]
+        self.c_ras = (np.array([_ / 2 for _ in T1.shape] + [1]) @ T1.affine.T)[:3]
 
     def resample(self, space_name, new_coords, new_faces=None):
         surface = Surface(self.native['sphere.reg'], self.native['faces'], is_sphere=True)
