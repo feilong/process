@@ -77,12 +77,23 @@ if __name__ == '__main__':
             '--output-spaces', 'fsaverage5',
         ],
 
-        'resample_flavor': 'on-avg-1031-final_ico32_2step_normals_equal',
+        # 'resample_flavor': 'on-avg-1031-final_ico32_2step_normals_equal',
     }
 
     run_fmriprep(config, cleanup=True)
 
-    out_dir = os.path.expanduser(f'~/singularity_home/data/final/forrest_{fmriprep_version}/onavg-ico32/2step_normals_equal/no-gsr')
-    regression_workflow(config, out_dir, rename_func, n_jobs=n_procs, resample_flavor='on-avg-1031-final_ico32_2step_normals_equal', ignore_non_existing=True)
-    out_dir = os.path.expanduser(f'~/singularity_home/data/final/forrest_{fmriprep_version}/fsavg-ico32/2step_normals_equal/no-gsr')
-    regression_workflow(config, out_dir, rename_func, n_jobs=n_procs, resample_flavor='fsaverage_ico32_2step_normals_equal', ignore_non_existing=True)
+    combinations = []
+    for space in ['fsavg-ico32', 'fsavg-ico64', 'fslr-ico32', 'fslr-ico64', 'onavg-ico32', 'onavg-ico64']:
+        combinations.append((space, '1step_pial_area'))
+    for step in ['1step', '2step']:
+        for projection_type in ['normals_equal', 'pial']:
+            for resample_method in ['nnfr', 'area']:
+                flavor = f'{step}_{projection_type}_{resample_method}'
+                key = ('onavg-ico64', flavor)
+                if key not in combinations:
+                    combinations.append(key)
+
+    for space, resample_flavor in combinations:
+        out_dir = os.path.expanduser(f'~/singularity_home/data/final/forrest_{fmriprep_version}/{space}/{resample_flavor}/no-gsr')
+        print(out_dir)
+        regression_workflow(config, out_dir, rename_func, space, resample_flavor, n_jobs=n_procs, ignore_non_existing=True)
