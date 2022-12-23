@@ -111,17 +111,17 @@ class FunctionalRun(object):
         self.nii_t1_affine = nii.affine
 
     def interpolate(
-            self, coords, onestep=True, interp_kwargs={'order': 1}, fill=np.nan, callback=None):
+            self, coords, onestep=True, interp_kwargs={'order': 1}, fill=np.nan, callback=None, n_jobs=1):
         if onestep:
             interps = interpolate_original_space(
                 self.nii_data, self.nii_affines, coords,
                 self.ref_to_t1, self.hmc, self.warp_data, self.warp_affines,
-                interp_kwargs, fill, callback)
+                interp_kwargs, fill, callback, n_jobs=n_jobs)
             return interps
         else:
             interps = interpolate_t1_space(
                 self.nii_t1, self.nii_t1_affine, coords,
-                interp_kwargs, fill, callback)
+                interp_kwargs, fill, callback, n_jobs=n_jobs)
             return interps
 
 
@@ -141,44 +141,62 @@ def _combine_interpolation_results(interps):
     raise ValueError
 
 
+def interpolate_original_space_single_volume(
+        data, affine, coords, warp, warp_affine, hmc, interp_kwargs, fill, callback):
+    cc = coords.copy()
+    if warp is not None:
+        diff = compute_warp(cc, warp.astype(np.float64), warp_affine)
+        cc[..., :3] += diff
+    cc = cc @ (hmc.T @ np.linalg.inv(affine).T)
+    interp = interpolate(data.astype(np.float64), cc, fill=fill, kwargs=interp_kwargs)
+    if callback is not None:
+        interp = callback(interp)
+    return interp
+
+
 def interpolate_original_space(nii_data, nii_affines, coords,
         ref_to_t1, hmc, warp_data=None, warp_affines=None,
-        interp_kwargs={'order': 1}, fill=np.nan, callback=None):
+        interp_kwargs={'order': 1}, fill=np.nan, callback=None, n_jobs=1):
     coords = coords @ ref_to_t1.T
-    interps = []
+    jobs = []
     for i, (data, affine) in enumerate(zip(nii_data, nii_affines)):
-        cc = coords.copy()
-        if warp_data is not None:
-            diff = compute_warp(cc, warp_data[i].astype(np.float64), warp_affines[i])
-            cc[..., :3] += diff
-        cc = cc @ (hmc[i].T @ np.linalg.inv(affine).T)
-
-        interp = interpolate(data.astype(np.float64), cc, fill=fill, kwargs=interp_kwargs)
-        if callback is not None:
-            interp = callback(interp)
-        interps.append(interp)
+        if warp_data is None:
+            warp, warp_affine = None, None
+        else:
+            warp, warp_affine = warp_data[i], warp_affines[i]
+        job = delayed(interpolate_original_space_single_volume)(
+            data, affine, coords, warp, warp_affine, hmc[i], interp_kwargs, fill, callback)
+        jobs.append(job)
+    with Parallel(n_jobs=n_jobs, verbose=1) as parallel:
+        interps = parallel(jobs)
     interps = _combine_interpolation_results(interps)
 
     return interps
 
 
+def interpolate_t1_space_single_volume(data, cc, fill, interp_kwargs, callback):
+    interp = interpolate(data.astype(np.float64), cc, fill=fill, kwargs=interp_kwargs)
+    if callback is not None:
+        interp = callback(interp)
+    return interp
+
+
 def interpolate_t1_space(nii_t1, nii_t1_affine, coords,
-        interp_kwargs={'order': 1}, fill=np.nan, callback=None):
+        interp_kwargs={'order': 1}, fill=np.nan, callback=None, n_jobs=1):
     cc = coords @ np.linalg.inv(nii_t1_affine.T)
-    interps = []
-    for data in nii_t1:
-        interp = interpolate(data.astype(np.float64), cc, fill=fill, kwargs=interp_kwargs)
-        if callback is not None:
-            interp = callback(interp)
-            # interp = np.nanmean(interp, axis=1)
-        interps.append(interp)
+    jobs = [
+        delayed(interpolate_t1_space_single_volume)(
+            data, cc, fill, interp_kwargs, callback)
+        for data in nii_t1]
+    with Parallel(n_jobs=n_jobs, verbose=1) as parallel:
+        interps = parallel(jobs)
     interps = _combine_interpolation_results(interps)
 
     return interps
 
 
 def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
-        tmpl_dir=os.path.expanduser('~/surface_template/lab/final')):
+        tmpl_dir=os.path.expanduser('~/surface_template/lab/final'), n_jobs=1):
     label2 = label.replace('-', '_')
     wf_dir = (f'{wf_root}/func_preproc_{label2}_wf')
     assert os.path.exists(wf_dir)
@@ -205,7 +223,7 @@ def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
 
             coords, callback = subj.get_surface_data(lr, sphere_fn, space, proj=proj, resample=resample)
             resampled = func_run.interpolate(
-                coords, onestep, interp_kwargs={'order': 1}, fill=np.nan, callback=callback)
+                coords, onestep, interp_kwargs={'order': 1}, fill=np.nan, callback=callback, n_jobs=n_jobs)
 
             np.save(out_fn, resampled)
 
@@ -222,7 +240,7 @@ def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
         coords = subj.get_volume_coords(use_mni=True)
         callback = lambda x: extract_data_in_mni(x, mm=mm, cortex=True)
         output = func_run.interpolate(
-            coords, True, interp_kwargs={'order': 1}, fill=np.nan, callback=callback)
+            coords, True, interp_kwargs={'order': 1}, fill=np.nan, callback=callback, n_jobs=n_jobs)
         for roi, resampled in output.items():
             out_fn = f'{out_dir}/{space}/{roi}/{tag}/sub-{sid}_{label}.npy'
             os.makedirs(os.path.dirname(out_fn), exist_ok=True)
@@ -278,11 +296,13 @@ def resample_workflow(
 
     subj = Subject(fs_dir=fs_dir, wf_root=wf_root, mni_hdf5=mni_hdf5, do_surf=True, do_canonical=True, do_mni=True)
 
-    jobs = [
-        delayed(workflow_single_run)(label, sid, wf_root, out_dir, combinations, subj)
-        for label in labels]
-    with Parallel(n_jobs=n_jobs) as parallel:
-        parallel(jobs)
+    for label in labels:
+        workflow_single_run(label, sid, wf_root, out_dir, combinations, subj, n_jobs=n_jobs)
+    # jobs = [
+    #     delayed(workflow_single_run)(label, sid, wf_root, out_dir, combinations, subj)
+    #     for label in labels]
+    # with Parallel(n_jobs=n_jobs) as parallel:
+    #     parallel(jobs)
 
     # brainmask = nib.load(f'{fs_dir}/mri/brainmask.mgz')
     # canonical = nib.as_closest_canonical(brainmask)
