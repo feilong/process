@@ -2,6 +2,8 @@ import numpy as np
 import nibabel as nib
 from scipy.ndimage import map_coordinates, spline_filter
 import warnings
+import h5py
+from nitransforms.io.itk import ITKCompositeH5
 
 
 def interpolate(img, ijk, fill=np.nan, kwargs={'order': 1}):
@@ -48,7 +50,7 @@ def interpolate(img, ijk, fill=np.nan, kwargs={'order': 1}):
 
 def compute_warp(xyz1, warp, affine, kwargs={'order': 1}):
     ijk1 = xyz1 @ np.linalg.inv(affine).T
-    diff = [interpolate(w, ijk1, fill=0., kwargs=kwargs)
+    diff = [interpolate(w.astype(np.float64), ijk1, fill=0., kwargs=kwargs)
             for w in np.moveaxis(warp, -1, 0)]
     diff = np.stack(diff, axis=-1)
     return diff
@@ -71,5 +73,25 @@ def parse_warp_image(nifti_fn, to_ras=True):
         warp = warp[:, :, :, 0, :]
     assert len(warp.shape) == 4 and warp.shape[3] == 3
     if to_ras:
-        warp[:, :, :, 2] *= -1
+        warp *= np.array([-1, -1, 1])
     return warp, affine
+
+
+def parse_combined_hdf5(h5_fn, to_ras=True):
+    h = h5py.File(h5_fn)
+    xform = ITKCompositeH5.from_h5obj(h)
+    affine = xform[0].to_ras()
+    assert h['TransformGroup']['2']['TransformType'][:][0] == b'DisplacementFieldTransform_float_3_3'
+    np.testing.assert_array_equal(
+        h['TransformGroup']['2']['TransformFixedParameters'][:],
+        np.array([193., 229., 193.,  96., 132., -78.,   1.,   1.,   1.,  -1.,   0.,   0.,   0.,  -1.,   0.,
+            0.,   0.,   1.]))
+    warp = h['TransformGroup']['2']['TransformParameters'][:]
+    warp = warp.reshape((193, 229, 193, 3)).transpose(2, 1, 0, 3)
+    warp *= np.array([-1, -1, 1])
+    warp_affine = np.array(
+        [[   1.,    0.,    0.,  -96.],
+         [   0.,    1.,    0., -132.],
+         [   0.,    0.,    1.,  -78.],
+         [   0.,    0.,    0.,    1.]])
+    return affine, warp, warp_affine
