@@ -62,12 +62,17 @@ class Subject(object):
         xyz1 = xyz1 @ affine.T
         self.mni_coords = xyz1
 
-    def get_surface_data(self, lr, sphere_fn, space, proj='pial', resample='area'):
+    def get_surface_data(self, lr, proj='pial'):
         hemi = self.hemispheres[lr]
         coords = hemi.get_coordinates(proj) @ self.lta.T
-        xform = hemi.get_transformation(sphere_fn, space, resample)
-        callback = lambda x: x.mean(axis=1) @ xform
-        return coords, callback
+        return coords
+
+    # def get_surface_data(self, lr, sphere_fn, space, proj='pial', resample='area'):
+    #     hemi = self.hemispheres[lr]
+    #     coords = hemi.get_coordinates(proj) @ self.lta.T
+    #     xform = hemi.get_transformation(sphere_fn, space, resample)
+    #     callback = lambda x: x.mean(axis=1) @ xform
+    #     return coords, callback
 
     def get_volume_coords(self, use_mni=True):
         if use_mni:
@@ -80,7 +85,9 @@ class FunctionalRun(object):
     # Temporarily removed the prefiltered data from Interpolator
     def __init__(self, wf_dir):
         self.wf_dir = wf_dir
+        self.has_data = False
 
+    def load_data(self):
         self.hmc = nt.io.itk.ITKLinearTransformArray.from_filename(
             f'{self.wf_dir}/bold_hmc_wf/fsl2itk/mat2itk.txt').to_ras()
         self.ref_to_t1 = nt.io.itk.ITKLinearTransform.from_filename(
@@ -109,9 +116,13 @@ class FunctionalRun(object):
         self.nii_t1 = np.asarray(nii.dataobj)
         self.nii_t1 = [self.nii_t1[..., _] for _ in range(self.nii_t1.shape[-1])]
         self.nii_t1_affine = nii.affine
+        self.has_data = True
 
     def interpolate(
             self, coords, onestep=True, interp_kwargs={'order': 1}, fill=np.nan, callback=None, n_jobs=1):
+        if not self.has_data:
+            self.load_data()
+
         if onestep:
             interps = interpolate_original_space(
                 self.nii_data, self.nii_affines, coords,
@@ -125,7 +136,15 @@ class FunctionalRun(object):
             return interps
 
 
-def _combine_interpolation_results(interps):
+def _combine_interpolation_results(interps, n_funcs):
+    if n_funcs:
+        output = []
+        for i in range(n_funcs):
+            subset = [interp[i] for interp in interps]
+            output.append(
+                _combine_interpolation_results(subset, 0))
+        return output
+
     if isinstance(interps[0], np.ndarray):
         interps = np.stack(interps, axis=0)
         return interps
@@ -141,6 +160,17 @@ def _combine_interpolation_results(interps):
     raise ValueError
 
 
+def run_callback(interp, callback):
+    if callback is None:
+        return interp
+    if isinstance(callback, (list, tuple)):
+        output = [func(interp) for func in callback]
+        return output
+    else:
+        output = callback(interp)
+        return output
+
+
 def interpolate_original_space_single_volume(
         data, affine, coords, warp, warp_affine, hmc, interp_kwargs, fill, callback):
     cc = coords.copy()
@@ -149,8 +179,7 @@ def interpolate_original_space_single_volume(
         cc[..., :3] += diff
     cc = cc @ (hmc.T @ np.linalg.inv(affine).T)
     interp = interpolate(data.astype(np.float64), cc, fill=fill, kwargs=interp_kwargs)
-    if callback is not None:
-        interp = callback(interp)
+    interp = run_callback(interp, callback)
     return interp
 
 
@@ -169,15 +198,15 @@ def interpolate_original_space(nii_data, nii_affines, coords,
         jobs.append(job)
     with Parallel(n_jobs=n_jobs, verbose=1) as parallel:
         interps = parallel(jobs)
-    interps = _combine_interpolation_results(interps)
+    n_funcs = len(callback) if isinstance(callback, (list, tuple)) else 0
+    interps = _combine_interpolation_results(interps, n_funcs)
 
     return interps
 
 
 def interpolate_t1_space_single_volume(data, cc, fill, interp_kwargs, callback):
     interp = interpolate(data.astype(np.float64), cc, fill=fill, kwargs=interp_kwargs)
-    if callback is not None:
-        interp = callback(interp)
+    interp = run_callback(interp, callback)
     return interp
 
 
@@ -190,7 +219,8 @@ def interpolate_t1_space(nii_t1, nii_t1_affine, coords,
         for data in nii_t1]
     with Parallel(n_jobs=n_jobs, verbose=1) as parallel:
         interps = parallel(jobs)
-    interps = _combine_interpolation_results(interps)
+    n_funcs = len(callback) if isinstance(callback, (list, tuple)) else 0
+    interps = _combine_interpolation_results(interps, n_funcs)
 
     return interps
 
@@ -203,30 +233,50 @@ def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
     func_run = FunctionalRun(wf_dir)
 
     for lr in 'lr':
+        todo = []
+        interp_methods = set()
         for space, onestep, proj, resample in combinations:
             tag = '_'.join([('1step' if onestep else '2step'), proj, resample])
             out_fn = f'{out_dir}/{space}/{lr}-cerebrum/{tag}/sub-{sid}_{label}.npy'
-            # out_fn = f'{out_dir}/{space}/{tag}/sub-{sid}_{label}_{lr}h.npy'
             if os.path.exists(out_fn):
                 continue
             print(out_fn)
             os.makedirs(os.path.dirname(out_fn), exist_ok=True)
+            todo.append((onestep, proj, space, resample, out_fn))
+            interp_methods.add((onestep, proj))
 
-            a, b = space.split('-')
-            if a == 'fsavg':
-                name = 'fsaverage_' + b
-            elif a == 'onavg':
-                name = 'on-avg-1031-final_' + b
-            else:
-                name = space
-            sphere_fn = f'{tmpl_dir}/{name}_{lr}h_sphere.npz'
+        for (onestep, proj) in interp_methods:
+            print(onestep, proj)
+            coords = subj.get_surface_data(lr, proj)
 
-            coords, callback = subj.get_surface_data(lr, sphere_fn, space, proj=proj, resample=resample)
-            resampled = func_run.interpolate(
-                coords, onestep, interp_kwargs={'order': 1}, fill=np.nan, callback=callback, n_jobs=n_jobs)
+            selected = [_ for _ in todo if _[:2] == (onestep, proj)]
+            funcs, out_fns = [], []
+            for sel in selected:
+                space, resample, out_fn = sel[2:]
 
-            np.save(out_fn, resampled)
+                a, b = space.split('-')
+                if a == 'fsavg':
+                    name = 'fsaverage_' + b
+                elif a == 'onavg':
+                    name = 'on-avg-1031-final_' + b
+                else:
+                    name = space
+                sphere_fn = f'{tmpl_dir}/{name}_{lr}h_sphere.npz'
 
+                xform = subj.hemispheres[lr].get_transformation(sphere_fn, space, resample)
+                callback = lambda x: x.mean(axis=1) @ xform
+                funcs.append(callback)
+                out_fns.append(out_fn)
+
+            output = func_run.interpolate(
+                coords, onestep, interp_kwargs={'order': 1}, fill=np.nan,
+                callback=funcs, n_jobs=n_jobs)
+            for resampled, out_fn in zip(output, out_fns):
+                np.save(out_fn, resampled)
+                print(resampled.shape, resampled.dtype, out_fn)
+
+    todo = []
+    funcs = []
     for mm in [2, 4]:
         space = f'mni-{mm}mm'
         tag = '1step_linear_overlap'
@@ -236,16 +286,18 @@ def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
             continue
         for out_fn in out_fns:
             os.makedirs(os.path.dirname(out_fn), exist_ok=True)
-
-        coords = subj.get_volume_coords(use_mni=True)
         callback = lambda x: extract_data_in_mni(x, mm=mm, cortex=True)
-        output = func_run.interpolate(
-            coords, True, interp_kwargs={'order': 1}, fill=np.nan, callback=callback, n_jobs=n_jobs)
-        for roi, resampled in output.items():
-            out_fn = f'{out_dir}/{space}/{roi}/{tag}/sub-{sid}_{label}.npy'
-            os.makedirs(os.path.dirname(out_fn), exist_ok=True)
-            np.save(out_fn, resampled)
+        todo.append(mm)
+        funcs.append(callback)
 
+    if todo:
+        coords = subj.get_volume_coords(use_mni=True)
+        output = func_run.interpolate(
+            coords, True, interp_kwargs={'order': 1}, fill=np.nan, callback=funcs, n_jobs=n_jobs)
+        for mm, res in zip(todo, output):
+            for roi, resampled in res.items():
+                out_fn = f'{out_dir}/{space}/{roi}/{tag}/sub-{sid}_{label}.npy'
+                np.save(out_fn, resampled)
 
     for mm in [2, 4]:
         space = f'mni-{mm}mm'
@@ -264,7 +316,7 @@ def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
         for in_fn in in_fns:
             d = np.asanyarray(nib.load(in_fn).dataobj)
             output.append(extract_data_in_mni(d, mm=mm, cortex=True))
-        output = _combine_interpolation_results(output)
+        output = _combine_interpolation_results(output, 0)
 
         for roi, resampled in output.items():
             out_fn = f'{out_dir}/{space}/{roi}/{tag}/sub-{sid}_{label}.npy'
