@@ -183,6 +183,20 @@ def interpolate_original_space_single_volume(
     return interp
 
 
+def _run_jobs_and_combine(jobs, callback, n_jobs):
+    n_funcs = len(callback) if isinstance(callback, (list, tuple)) else 0
+    n_batches = len(jobs) // n_jobs + int(len(jobs) % n_jobs > 0)
+    batches = np.array_split(jobs, n_batches)
+    results = []
+    with Parallel(n_jobs=n_jobs, verbose=1) as parallel:
+        for batch in batches:
+            res = parallel(batch)
+            res = _combine_interpolation_results(res, n_funcs)
+            results.append(res)
+    results = _combine_interpolation_results(results, n_funcs)
+    return results
+
+
 def interpolate_original_space(nii_data, nii_affines, coords,
         ref_to_t1, hmc, warp_data=None, warp_affines=None,
         interp_kwargs={'order': 1}, fill=np.nan, callback=None, n_jobs=1):
@@ -196,12 +210,8 @@ def interpolate_original_space(nii_data, nii_affines, coords,
         job = delayed(interpolate_original_space_single_volume)(
             data, affine, coords, warp, warp_affine, hmc[i], interp_kwargs, fill, callback)
         jobs.append(job)
-    with Parallel(n_jobs=n_jobs, verbose=1) as parallel:
-        interps = parallel(jobs)
-    n_funcs = len(callback) if isinstance(callback, (list, tuple)) else 0
-    interps = _combine_interpolation_results(interps, n_funcs)
-
-    return interps
+    results = _run_jobs_and_combine(jobs, callback, n_jobs)
+    return results
 
 
 def interpolate_t1_space_single_volume(data, cc, fill, interp_kwargs, callback):
@@ -217,12 +227,8 @@ def interpolate_t1_space(nii_t1, nii_t1_affine, coords,
         delayed(interpolate_t1_space_single_volume)(
             data, cc, fill, interp_kwargs, callback)
         for data in nii_t1]
-    with Parallel(n_jobs=n_jobs, verbose=1) as parallel:
-        interps = parallel(jobs)
-    n_funcs = len(callback) if isinstance(callback, (list, tuple)) else 0
-    interps = _combine_interpolation_results(interps, n_funcs)
-
-    return interps
+    results = _run_jobs_and_combine(jobs, callback, n_jobs)
+    return results
 
 
 def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
