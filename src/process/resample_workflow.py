@@ -67,13 +67,6 @@ class Subject(object):
         coords = hemi.get_coordinates(proj) @ self.lta.T
         return coords
 
-    # def get_surface_data(self, lr, sphere_fn, space, proj='pial', resample='area'):
-    #     hemi = self.hemispheres[lr]
-    #     coords = hemi.get_coordinates(proj) @ self.lta.T
-    #     xform = hemi.get_transformation(sphere_fn, space, resample)
-    #     callback = lambda x: x.mean(axis=1) @ xform
-    #     return coords, callback
-
     def get_volume_coords(self, use_mni=True):
         if use_mni:
             return self.mni_coords
@@ -94,9 +87,10 @@ class FunctionalRun(object):
             f'{self.wf_dir}/bold_reg_wf/bbreg_wf/concat_xfm/out_fwd.tfm').to_ras()
 
         nii_fns = sorted(glob(f'{self.wf_dir}/bold_split/vol*.nii.gz'))
+        self.nt = len(nii_fns)
         warp_fns = sorted(glob(f'{self.wf_dir}/unwarp_wf/resample/vol*_xfm.nii.gz'))
         if len(warp_fns):
-            assert len(nii_fns) == len(warp_fns)
+            assert self.nt == len(warp_fns)
 
         self.nii_data, self.nii_affines = [], []
         for i, nii_fn in enumerate(nii_fns):
@@ -119,7 +113,8 @@ class FunctionalRun(object):
         self.has_data = True
 
     def interpolate(
-            self, coords, onestep=True, interp_kwargs={'order': 1}, fill=np.nan, callback=None, n_jobs=1):
+            self, coords, onestep=True, interp_kwargs={'order': 1}, fill=np.nan, callback=None,
+            combine_funcs=None, n_jobs=1):
         if not self.has_data:
             self.load_data()
 
@@ -127,37 +122,41 @@ class FunctionalRun(object):
             interps = interpolate_original_space(
                 self.nii_data, self.nii_affines, coords,
                 self.ref_to_t1, self.hmc, self.warp_data, self.warp_affines,
-                interp_kwargs, fill, callback, n_jobs=n_jobs)
+                interp_kwargs, fill, callback, combine_funcs, n_jobs=n_jobs)
             return interps
         else:
             interps = interpolate_t1_space(
                 self.nii_t1, self.nii_t1_affine, coords,
-                interp_kwargs, fill, callback, n_jobs=n_jobs)
+                interp_kwargs, fill, callback, combine_funcs, n_jobs=n_jobs)
             return interps
 
 
-def _combine_interpolation_results(interps, n_funcs):
+def _combine_interpolation_results(interps, n_funcs, combine_funcs, stack=True):
     if n_funcs:
         output = []
         for i in range(n_funcs):
             subset = [interp[i] for interp in interps]
             output.append(
-                _combine_interpolation_results(subset, 0))
+                _combine_interpolation_results(subset, 0, combine_funcs[i], stack))
         return output
 
+    func = np.stack if stack else np.concatenate
+
     if isinstance(interps[0], np.ndarray):
-        interps = np.stack(interps, axis=0)
-        return interps
-    if isinstance(interps[0], dict):
+        output = func(interps, axis=0)
+    elif isinstance(interps[0], dict):
         keys = list(interps[0])
         output = {key: [] for key in keys}
         for interp in interps:
             for key in keys:
                 output[key].append(interp[key])
         for key in keys:
-            output[key] = np.stack(output[key], axis=0)
-        return output
-    raise ValueError
+            output[key] = func(output[key], axis=0)
+    else:
+        raise ValueError
+    if combine_funcs is not None:
+        output = combine_funcs(output)
+    return output
 
 
 def run_callback(interp, callback):
@@ -183,23 +182,24 @@ def interpolate_original_space_single_volume(
     return interp
 
 
-def _run_jobs_and_combine(jobs, callback, n_jobs):
+def _run_jobs_and_combine(jobs, callback, combine_funcs, n_jobs):
     n_funcs = len(callback) if isinstance(callback, (list, tuple)) else 0
     n_batches = len(jobs) // n_jobs + int(len(jobs) % n_jobs > 0)
-    batches = np.array_split(jobs, n_batches)
+    batch_indices = np.array_split(np.arange(len(jobs)), n_batches)
     results = []
     with Parallel(n_jobs=n_jobs, verbose=1) as parallel:
-        for batch in batches:
+        for idx in batch_indices:
+            batch = [jobs[_] for _ in idx]
             res = parallel(batch)
-            res = _combine_interpolation_results(res, n_funcs)
+            res = _combine_interpolation_results(res, n_funcs, combine_funcs)
             results.append(res)
-    results = _combine_interpolation_results(results, n_funcs)
+    results = _combine_interpolation_results(results, n_funcs, combine_funcs, stack=False)
     return results
 
 
 def interpolate_original_space(nii_data, nii_affines, coords,
         ref_to_t1, hmc, warp_data=None, warp_affines=None,
-        interp_kwargs={'order': 1}, fill=np.nan, callback=None, n_jobs=1):
+        interp_kwargs={'order': 1}, fill=np.nan, callback=None, combine_funcs=None, n_jobs=1):
     coords = coords @ ref_to_t1.T
     jobs = []
     for i, (data, affine) in enumerate(zip(nii_data, nii_affines)):
@@ -210,7 +210,7 @@ def interpolate_original_space(nii_data, nii_affines, coords,
         job = delayed(interpolate_original_space_single_volume)(
             data, affine, coords, warp, warp_affine, hmc[i], interp_kwargs, fill, callback)
         jobs.append(job)
-    results = _run_jobs_and_combine(jobs, callback, n_jobs)
+    results = _run_jobs_and_combine(jobs, callback, combine_funcs, n_jobs)
     return results
 
 
@@ -221,13 +221,13 @@ def interpolate_t1_space_single_volume(data, cc, fill, interp_kwargs, callback):
 
 
 def interpolate_t1_space(nii_t1, nii_t1_affine, coords,
-        interp_kwargs={'order': 1}, fill=np.nan, callback=None, n_jobs=1):
+        interp_kwargs={'order': 1}, fill=np.nan, callback=None, combine_funcs=None, n_jobs=1):
     cc = coords @ np.linalg.inv(nii_t1_affine.T)
     jobs = [
         delayed(interpolate_t1_space_single_volume)(
             data, cc, fill, interp_kwargs, callback)
         for data in nii_t1]
-    results = _run_jobs_and_combine(jobs, callback, n_jobs)
+    results = _run_jobs_and_combine(jobs, callback, combine_funcs, n_jobs)
     return results
 
 
@@ -256,7 +256,7 @@ def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
             coords = subj.get_surface_data(lr, proj)
 
             selected = [_ for _ in todo if _[:2] == (onestep, proj)]
-            funcs, out_fns = [], []
+            funcs, combine_funcs, out_fns = [], [], []
             for sel in selected:
                 space, resample, out_fn = sel[2:]
 
@@ -272,20 +272,22 @@ def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
                 xform = subj.hemispheres[lr].get_transformation(sphere_fn, space, resample)
                 callback = lambda x: x.mean(axis=1) @ xform
                 funcs.append(callback)
+                combine_funcs.append(None)
                 out_fns.append(out_fn)
 
             output = func_run.interpolate(
                 coords, onestep, interp_kwargs={'order': 1}, fill=np.nan,
-                callback=funcs, n_jobs=n_jobs)
+                callback=funcs, combine_funcs=combine_funcs, n_jobs=n_jobs)
             for resampled, out_fn in zip(output, out_fns):
                 np.save(out_fn, resampled)
                 print(resampled.shape, resampled.dtype, out_fn)
 
     todo = []
     funcs = []
+    combine_funcs = []
+    tag = '1step_linear_overlap'
     for mm in [2, 4]:
         space = f'mni-{mm}mm'
-        tag = '1step_linear_overlap'
         rois = list(aseg_mapping.values())
         out_fns = [f'{out_dir}/{space}/{roi}/{tag}/sub-{sid}_{label}.npy' for roi in rois]
         if all([os.path.exists(_) for _ in out_fns]):
@@ -295,19 +297,33 @@ def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
         callback = lambda x: extract_data_in_mni(x, mm=mm, cortex=True)
         todo.append(mm)
         funcs.append(callback)
+        combine_funcs.append(None)
+    out_fn = f'{out_dir}/mni-1mm/average-volume/{tag}/sub-{sid}_{label}.nii.gz'
+    if not os.path.exists(out_fn):
+        todo.append(1)
+        funcs.append(lambda x: x)
+        combine_funcs.append(lambda x: np.sum(x, axis=0, keepdims=True))
+        os.makedirs(os.path.dirname(out_fn), exist_ok=True)
 
     if todo:
         coords = subj.get_volume_coords(use_mni=True)
         output = func_run.interpolate(
-            coords, True, interp_kwargs={'order': 1}, fill=np.nan, callback=funcs, n_jobs=n_jobs)
+            coords, True, interp_kwargs={'order': 1}, fill=np.nan, callback=funcs,
+            combine_funcs=combine_funcs, n_jobs=n_jobs)
         for mm, res in zip(todo, output):
-            for roi, resampled in res.items():
-                out_fn = f'{out_dir}/{space}/{roi}/{tag}/sub-{sid}_{label}.npy'
-                np.save(out_fn, resampled)
+            space = f'mni-{mm}mm'
+            if isinstance(res, dict):
+                for roi, resampled in res.items():
+                    out_fn = f'{out_dir}/{space}/{roi}/{tag}/sub-{sid}_{label}.npy'
+                    np.save(out_fn, resampled)
+            else:
+                out_fn = f'{out_dir}/{space}/average-volume/{tag}/sub-{sid}_{label}.nii.gz'
+                img = nib.Nifti1Image(np.squeeze(res) / func_run.nt, affine=mni_affine)
+                img.to_filename(out_fn)
 
+    tag = '1step_fmriprep_overlap'
     for mm in [2, 4]:
         space = f'mni-{mm}mm'
-        tag = '1step_fmriprep_overlap'
         rois = list(aseg_mapping.values())
         out_fns = [f'{out_dir}/{space}/{roi}/{tag}/sub-{sid}_{label}.npy' for roi in rois]
         if all([os.path.exists(_) for _ in out_fns]):
@@ -322,11 +338,34 @@ def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
         for in_fn in in_fns:
             d = np.asanyarray(nib.load(in_fn).dataobj)
             output.append(extract_data_in_mni(d, mm=mm, cortex=True))
-        output = _combine_interpolation_results(output, 0)
+        output = _combine_interpolation_results(output, 0, None)
 
         for roi, resampled in output.items():
             out_fn = f'{out_dir}/{space}/{roi}/{tag}/sub-{sid}_{label}.npy'
             np.save(out_fn, resampled)
+
+    out_fn = f'{out_dir}/mni-1mm/average-volume/{tag}/sub-{sid}_{label}.nii.gz'
+    if not os.path.exists(out_fn):
+        os.makedirs(os.path.dirname(out_fn), exist_ok=True)
+        in_fns = sorted(glob(os.path.join(
+            wf_dir, 'bold_std_trans_wf', '_std_target_MNI152NLin2009cAsym.res1',
+            'bold_to_std_transform', 'vol*_xform-*.nii.gz')))
+        res = dc_sum(in_fns)
+        img = nib.Nifti1Image(res / len(in_fns), affine=mni_affine)
+        img.to_filename(out_fn)
+
+
+def dc_sum(in_fns):
+    if len(in_fns) in [1, 2]:
+        arr = []
+        for in_fn in in_fns:
+            d = np.asanyarray(nib.load(in_fn).dataobj)
+            arr.append(d)
+        return np.sum(arr, axis=0)
+
+    n = len(in_fns) // 2
+    arr = dc_sum(in_fns[:n]) + dc_sum(in_fns[n:])
+    return arr
 
 
 def resample_workflow(
@@ -356,28 +395,3 @@ def resample_workflow(
 
     for label in labels:
         workflow_single_run(label, sid, wf_root, out_dir, combinations, subj, n_jobs=n_jobs)
-    # jobs = [
-    #     delayed(workflow_single_run)(label, sid, wf_root, out_dir, combinations, subj)
-    #     for label in labels]
-    # with Parallel(n_jobs=n_jobs) as parallel:
-    #     parallel(jobs)
-
-    # brainmask = nib.load(f'{fs_dir}/mri/brainmask.mgz')
-    # canonical = nib.as_closest_canonical(brainmask)
-    # boundaries = find_truncation_boundaries(np.asarray(canonical.dataobj))
-    # for key in ['T1', 'T2', 'brainmask', 'ribbon']:
-    #     out_fn = f'{out_dir}/average-volume/sub-{sid}_{key}.npy'
-    #     img = nib.load(f'{fs_dir}/mri/{key}.mgz')
-    #     canonical = nib.as_closest_canonical(img)
-    #     data = np.asarray(canonical.dataobj)
-    #     data = data[boundaries[0, 0]:boundaries[0, 1], boundaries[1, 0]:boundaries[1, 1], boundaries[2, 0]:boundaries[2, 1]]
-    #     np.save(out_fn, data)
-
-#     out_fn = f'{out_dir}/average-volume/sub-{sid}_{label}.npy'
-#     if not os.path.exists(out_fn):
-#         if interpolator is None:
-#             interpolator = Interpolator(sid, label, fs_dir, wf_dir)
-#             interpolator.prepare(orders=[1])
-#         vol = np.mean(interpolator.interpolate_volume(), axis=0)
-#         os.makedirs(os.path.dirname(out_fn), exist_ok=True)
-#         np.save(out_fn, vol)
