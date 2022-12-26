@@ -6,6 +6,7 @@ from glob import glob
 from .fmriprep import fmriprep_cmd
 from .compression import copy_files_to_lzma_tar
 from .resample_workflow import resample_workflow
+from .confound import confound_workflow
 
 
 class PreprocessWorkflow(object):
@@ -18,12 +19,14 @@ class PreprocessWorkflow(object):
             os.makedirs(self.config[key], exist_ok=True)
 
         self.log_dir = os.path.join(self.config['output_root'], 'logs')
-        self.fmriprep_dir = os.path.join(self.config['output_root'], 'fmriprep')
-        self.freesurfer_dir = os.path.join(self.config['output_root'], 'freesurfer')
-        self.summary_dir = os.path.join(self.config['output_summary_root'], 'summary')
-        self.confounds_dir = os.path.join(self.config['output_data_root'], 'confounds')
+
+        fmriprep_dir = os.path.join(self.config['output_root'], 'fmriprep')
+        freesurfer_dir = os.path.join(self.config['output_root'], 'freesurfer')
+        summary_dir = self.config['output_summary_root']
+        confounds_dir = os.path.join(self.config['output_root'], 'confounds')
         self.resample_dir = os.path.join(self.config['output_data_root'], 'resampled')
-        for dir_name in [self.log_dir, self.fmriprep_dir, self.freesurfer_dir, self.summary_dir, self.confounds_dir]:
+        self.confound_dir = os.path.join(self.config['output_data_root'], 'confounds')
+        for dir_name in [self.log_dir, fmriprep_dir, freesurfer_dir, summary_dir, confounds_dir, self.confound_dir]:
             os.makedirs(dir_name, exist_ok=True)
 
         self.fmriprep_out = os.path.join(self.config['fmriprep_out'], f'sub-{sid}')
@@ -34,10 +37,10 @@ class PreprocessWorkflow(object):
         else:
             self.work_out = os.path.join(config['fmriprep_work'], f'fmriprep_wf', f'single_subject_{sid}_wf')
 
-        self.fmriprep_fn = os.path.join(self.fmriprep_dir, f'{sid}.tar.lzma')
-        self.freesurfer_fn = os.path.join(self.freesurfer_dir, f'{sid}.tar.lzma')
-        self.summary_fn = os.path.join(self.summary_dir, f'{sid}.tar.lzma')
-        self.confounds_fn = os.path.join(self.confounds_dir, f'{sid}.tar.lzma')
+        self.fmriprep_fn = os.path.join(fmriprep_dir, f'{sid}.tar.lzma')
+        self.freesurfer_fn = os.path.join(freesurfer_dir, f'{sid}.tar.lzma')
+        self.summary_fn = os.path.join(summary_dir, f'{sid}.tar.lzma')
+        self.confounds_fn = os.path.join(confounds_dir, f'{sid}.tar.lzma')
     
     def _run_method(self, name='fmriprep'):
         sid = self.sid
@@ -62,6 +65,8 @@ class PreprocessWorkflow(object):
             step = self._run_compress
         elif name == 'cleanup':
             step = self._run_cleanup
+        elif name == 'confound':
+            step = self._run_confound
         else:
             raise ValueError
         try:
@@ -101,6 +106,10 @@ class PreprocessWorkflow(object):
             sid=self.sid, bids_dir=self.config['bids_dir'],
             fs_dir=self.freesurfer_out, wf_root=self.work_out, out_dir=self.resample_dir,
             n_jobs=self.config['n_procs'], combinations=self.config['combinations'])
+        return True, ''
+
+    def _run_confound(self):
+        confound_workflow(self.fmriprep_out, self.confound_dir)
         return True, ''
 
     def _run_compress(self):
@@ -147,3 +156,6 @@ class PreprocessWorkflow(object):
 
     def cleanup(self):
         self._run_method('cleanup')
+
+    def confound(self):
+        self._run_method('confound')
