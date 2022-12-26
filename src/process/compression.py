@@ -9,29 +9,33 @@ import nibabel as nib
 from datetime import datetime
 
 
-def prepare_files(inputs):
+def prepare_files(inputs, exclude):
     if isinstance(inputs, str):
         inputs = [inputs]
     todo = []
     for input_ in inputs:
         if os.path.isfile(input_):
+            if exclude is not None and exclude(input_):
+                continue
             size = os.path.getsize(input_)
             todo.append((size, input_))
         elif os.path.isdir(input_):
             for root, dirs, files in os.walk(input_):
                 for name in files:
+                    if exclude is not None and exclude(os.path.join(root, name)):
+                        continue
                     size = os.path.getsize(os.path.join(root, name))
                     todo.append((size, os.path.join(root, name)))
     return todo
 
 
-def copy_files_to_lzma_tar(lzma_fn, inputs, rename_func=None, check=True, overwrite=False):
+def copy_files_to_lzma_tar(lzma_fn, inputs, rename_func=None, check=True, overwrite=False, exclude=None):
     if not overwrite and os.path.exists(lzma_fn):
         return
     os.makedirs(os.path.dirname(os.path.realpath(lzma_fn)), exist_ok=True)
     t0 = datetime.now()
     tar_io = io.BytesIO()
-    todo = prepare_files(inputs)
+    todo = prepare_files(inputs, exclude=exclude)
     s1 = sum([_[0] for _ in todo])
 
     with tarfile.open(fileobj=tar_io, mode='w') as tf:
@@ -50,11 +54,11 @@ def copy_files_to_lzma_tar(lzma_fn, inputs, rename_func=None, check=True, overwr
     print(t1, lzma_fn, t1-t0, s1, s2, s3, s3/s2, s2/s1, s3/s1)
 
     if check:
-        assert compare_files_lzma_tar(lzma_fn, inputs, rename_func=rename_func)
+        assert compare_files_lzma_tar(lzma_fn, inputs, rename_func=rename_func, exclude=exclude)
 
 
-def compare_files_lzma_tar(lzma_fn, inputs, rename_func=None):
-    todo = prepare_files(inputs)
+def compare_files_lzma_tar(lzma_fn, inputs, rename_func=None, exclude=None):
+    todo = prepare_files(inputs, exclude=exclude)
     with tarfile.open(lzma_fn, 'r:xz') as tf:
         tf_fns = [_.name for _ in tf]
         if len(todo) != len(tf_fns):
