@@ -286,7 +286,7 @@ def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
     funcs = []
     combine_funcs = []
     tag = '1step_linear_overlap'
-    for mm in [2, 4]:
+    for mm in [2, 3, 4]:
         space = f'mni-{mm}mm'
         rois = list(aseg_mapping.values())
         out_fns = [f'{out_dir}/{space}/{roi}/{tag}/sub-{sid}_{label}.npy' for roi in rois]
@@ -322,7 +322,7 @@ def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
                 img.to_filename(out_fn)
 
     tag = '1step_fmriprep_overlap'
-    for mm in [2, 4]:
+    for mm in [2, 3, 4]:
         space = f'mni-{mm}mm'
         rois = list(aseg_mapping.values())
         out_fns = [f'{out_dir}/{space}/{roi}/{tag}/sub-{sid}_{label}.npy' for roi in rois]
@@ -373,11 +373,14 @@ def resample_workflow(
         combinations=[
             ('onavg-ico32', '1step_pial_area'),
         ],
+        filter_=None,
         n_jobs=1,
     ):
 
     raw_bolds = sorted(glob(f'{bids_dir}/sub-{sid}/ses-*/func/*_bold.nii.gz')) + \
         sorted(glob(f'{bids_dir}/sub-{sid}/func/*_bold.nii.gz'))
+    if filter_ is not None:
+        raw_bolds = filter_(raw_bolds)
     labels = [os.path.basename(_).split(f'sub-{sid}_', 1)[1].rsplit('_bold.nii.gz', 1)[0] for _ in raw_bolds]
 
     new_combinations = []
