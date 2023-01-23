@@ -1,3 +1,7 @@
+import os
+from glob import glob
+
+
 def fmriprep_cmd(config):
     cmd = [
         'singularity', 'run', '-e',
@@ -10,3 +14,20 @@ def fmriprep_cmd(config):
         config['bids_dir'], config['fmriprep_out'], 'participant',
     ]
     return cmd
+
+
+def fmriprep_success(returncode, stdout_fn, fmriprep_out):
+    if returncode == 0:
+        return True
+
+    if os.path.exists(stdout_fn):
+        with open(stdout_fn, 'r') as f:
+            content = f.read()
+        if 'fMRIPrep finished successfully!' in content:
+            return True
+
+        crashes = glob(os.path.join(fmriprep_out, 'log', '*', 'crash-*.txt'))
+        if len(crashes) <= 2 and all(['_midthickness' in _ for _ in crashes]):
+            return True
+
+    return False

@@ -3,7 +3,7 @@ import subprocess
 import shutil
 from glob import glob
 
-from .fmriprep import fmriprep_cmd
+from .fmriprep import fmriprep_cmd, fmriprep_success
 from .compression import copy_files_to_lzma_tar
 from .resample_workflow import resample_workflow
 from .confound import confound_workflow
@@ -42,7 +42,7 @@ class PreprocessWorkflow(object):
         self.summary_fn = os.path.join(summary_dir, f'{sid}.tar.lzma')
         self.confounds_fn = os.path.join(confounds_dir, f'{sid}.tar.lzma')
     
-    def _run_method(self, name='fmriprep'):
+    def _run_method(self, name='fmriprep', **kwargs):
         sid = self.sid
         finish_fn = f'{self.log_dir}/{sid}_{name}_finish.txt'
         running_fn = f'{self.log_dir}/{sid}_{name}_running.txt'
@@ -70,9 +70,11 @@ class PreprocessWorkflow(object):
         else:
             raise ValueError
         try:
-            success, message = step()
+            success, message = step(**kwargs)
+            error = None
         except Exception as e:
             success = False
+            error = e
             message = str(e)
 
         fn = finish_fn if success else error_fn
@@ -81,9 +83,13 @@ class PreprocessWorkflow(object):
         if os.path.exists(running_fn):
             os.remove(running_fn)
 
+        if error is not None:
+            raise error
+
         if not success:
             print(message)
             exit(1)
+        return success
 
     def _run_fmriprep(self):
         sid = self.sid
@@ -92,20 +98,19 @@ class PreprocessWorkflow(object):
         stderr_fn = os.path.join(self.log_dir, f'{sid}_fmriprep_stderr.txt')
         with open(stdout_fn, 'w') as f1, open(stderr_fn, 'w') as f2:
             proc = subprocess.run(cmd, stdout=f1, stderr=f2)
-        with open(stdout_fn, 'r') as f:
-            content = f.read()
-            success = not (
-                proc.returncode != 0 and 'fMRIPrep finished successfully!' not in content)
+
+        success = fmriprep_success(proc.returncode, stdout_fn, self.fmriprep_out)
+
         message = '\n'.join([
             f"{self.config['dset']}, {sid}, {proc.returncode}",
             str(self.config), str(cmd), ' '.join(cmd)])
         return success, message
 
-    def _run_resample(self):
+    def _run_resample(self, filter_):
         resample_workflow(
             sid=self.sid, bids_dir=self.config['bids_dir'],
             fs_dir=self.freesurfer_out, wf_root=self.work_out, out_dir=self.resample_dir,
-            n_jobs=self.config['n_procs'], combinations=self.config['combinations'])
+            n_jobs=self.config['n_procs'], combinations=self.config['combinations'], filter_=filter_)
         return True, ''
 
     def _run_confound(self):
@@ -116,7 +121,7 @@ class PreprocessWorkflow(object):
         copy_files_to_lzma_tar(
             self.fmriprep_fn,
             [_ for _ in sorted(glob(os.path.join(self.config['fmriprep_out'], '*'))) if os.path.basename(_) != 'sourcedata'],
-            rename_func=lambda x: os.path.relpath(x, config['fmriprep_out']),
+            rename_func=lambda x: os.path.relpath(x, self.config['fmriprep_out']),
             exclude = lambda fn: fn.endswith('space-MNI152NLin2009cAsym_res-1_desc-preproc_bold.nii.gz')
         )
         copy_files_to_lzma_tar(
@@ -136,7 +141,7 @@ class PreprocessWorkflow(object):
         )
         return True, ''
 
-    def _cleanup(self):
+    def _run_cleanup(self):
         if all([os.path.exists(_) for _ in [self.fmriprep_fn, self.freesurfer_fn, self.summary_fn, self.confounds_fn]]):
             for root in [self.config['fmriprep_out'], self.config['fmriprep_work']]:
                 if os.path.exists(root):
@@ -146,16 +151,16 @@ class PreprocessWorkflow(object):
             return False, 'Not all output files exist.'
 
     def fmriprep(self):
-        self._run_method('fmriprep')
+        return self._run_method('fmriprep')
 
-    def resample(self):
-        self._run_method('resample')
+    def resample(self, filter_=None):
+        return self._run_method('resample', filter_=filter_)
 
     def compress(self):
-        self._run_method('compress')
+        return self._run_method('compress')
 
     def cleanup(self):
-        self._run_method('cleanup')
+        return self._run_method('cleanup')
 
     def confound(self):
-        self._run_method('confound')
+        return self._run_method('confound')
