@@ -6,12 +6,13 @@ import nitransforms as nt
 from joblib import Parallel, delayed
 
 from .surface import Hemisphere
-from .volume import mni_affine, mni_coords, canonical_volume_coords, aseg_mapping, extract_data_in_mni
+from .volume import mni_affine, mni_coords, find_truncation_boundaries, canonical_volume_coords, aseg_mapping, extract_data_in_mni
 from .resample import parse_combined_hdf5, compute_warp, parse_warp_image, interpolate
 
 
 class Subject(object):
-    def __init__(self, fs_dir=None, wf_root=None, mni_hdf5=None, do_surf=True, do_canonical=True, do_mni=True):
+    def __init__(self, sid, fs_dir=None, wf_root=None, mni_hdf5=None, do_surf=True, do_canonical=True, do_mni=True):
+        self.sid = sid
         self.fs_dir = fs_dir
         self.wf_root = wf_root
         self.mni_hdf5 = mni_hdf5
@@ -72,6 +73,31 @@ class Subject(object):
             return self.mni_coords
         else:
             return self.canonical_coords
+
+    def export_canonical(self, out_dir):
+        assert self.fs_dir is not None
+        img = nib.load(f'{self.fs_dir}/mri/brainmask.mgz')
+        canonical = nib.as_closest_canonical(img)
+        boundaries = find_truncation_boundaries(np.asarray(canonical.dataobj))
+        affine = canonical.affine.copy()
+        affine[:, 3] = affine @ np.concatenate([boundaries[:3, 0], np.array([1.])])
+        self.canonical_affine = affine
+
+        for key in ['T1', 'T2', 'FLAIR', 'brainmask', 'ribbon']:
+            fs_fn = f'{self.fs_dir}/mri/{key}.mgz'
+            if not os.path.exists(fs_fn):
+                if key in ['T2', 'FLAIR']:
+                    continue
+                else:
+                    raise Exception(f"FreeSurfer {key} volumn not found.")
+            out_fn = f'{out_dir}/canonical/average-volume/freesurfer/sub-{self.sid}_{key}.nii.gz'
+            img = nib.load(fs_fn)
+            canonical = nib.as_closest_canonical(img)
+            data = np.asarray(canonical.dataobj)
+            data = data[boundaries[0, 0]:boundaries[0, 1], boundaries[1, 0]:boundaries[1, 1], boundaries[2, 0]:boundaries[2, 1]]
+            new_img = nib.Nifti1Image(data, affine, header=canonical.header)
+            os.makedirs(os.path.dirname(out_fn), exist_ok=True)
+            new_img.to_filename(out_fn)
 
 
 class FunctionalRun(object):
@@ -321,6 +347,18 @@ def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
                 img = nib.Nifti1Image(np.squeeze(res) / func_run.nt, affine=mni_affine)
                 img.to_filename(out_fn)
 
+    tag = '1step_linear_overlap'
+    space = 'canonical'
+    out_fn = f'{out_dir}/{space}/average-volume/{tag}/sub-{sid}_{label}.nii.gz'
+    if not os.path.exists(out_fn):
+        os.makedirs(os.path.dirname(out_fn), exist_ok=True)
+        coords = subj.get_volume_coords(use_mni=False)
+        output = func_run.interpolate(
+            coords, True, interp_kwargs={'order': 1}, fill=np.nan, callback=[lambda x: x],
+            combine_funcs=[lambda x: np.sum(x, axis=0, keepdims=True)], n_jobs=n_jobs)
+        img = nib.Nifti1Image(np.squeeze(output[0]) / func_run.nt, affine=subj.canonical_affine)
+        img.to_filename(out_fn)
+
     tag = '1step_fmriprep_overlap'
     for mm in [2, 3, 4]:
         space = f'mni-{mm}mm'
@@ -394,7 +432,7 @@ def resample_workflow(
     mni_hdf5 = os.path.join(wf_root, 'anat_preproc_wf', 'anat_norm_wf', '_template_MNI152NLin2009cAsym',
                             'registration', 'ants_t1_to_mniComposite.h5')
 
-    subj = Subject(fs_dir=fs_dir, wf_root=wf_root, mni_hdf5=mni_hdf5, do_surf=True, do_canonical=True, do_mni=True)
-
+    subj = Subject(sid, fs_dir=fs_dir, wf_root=wf_root, mni_hdf5=mni_hdf5, do_surf=True, do_canonical=True, do_mni=True)
+    subj.export_canonical(out_dir=out_dir)
     for label in labels:
         workflow_single_run(label, sid, wf_root, out_dir, combinations, subj, n_jobs=n_jobs)
