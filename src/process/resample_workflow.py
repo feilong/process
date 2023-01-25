@@ -131,6 +131,8 @@ class FunctionalRun(object):
                 warp_data, warp_affine = parse_warp_image(warp_fn)
                 self.warp_data.append(warp_data)
                 self.warp_affines.append(warp_affine)
+        else:
+            self.warp_data, self.warp_affines = None, None
 
         nii = nib.load(f'{self.wf_dir}/bold_t1_trans_wf/merge/vol0000_xform-00000_clipped_merged.nii')
         self.nii_t1 = np.asarray(nii.dataobj)
