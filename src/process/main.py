@@ -29,13 +29,17 @@ class PreprocessWorkflow(object):
         for dir_name in [self.log_dir, fmriprep_dir, freesurfer_dir, summary_dir, confounds_dir, self.confound_dir]:
             os.makedirs(dir_name, exist_ok=True)
 
-        self.fmriprep_out = os.path.join(self.config['fmriprep_out'], f'sub-{sid}')
-        self.freesurfer_out = os.path.join(self.config['fmriprep_out'], 'sourcedata', 'freesurfer', f'sub-{sid}')
         major, minor = self.config['fmriprep_version'].split('.')[:2]
         if int(major) >= 22:
             self.work_out = os.path.join(config['fmriprep_work'], f'fmriprep_{major}_{minor}_wf', f'single_subject_{sid}_wf')
         else:
             self.work_out = os.path.join(config['fmriprep_work'], f'fmriprep_wf', f'single_subject_{sid}_wf')
+        if int(major) >= 21:
+            self.freesurfer_out = os.path.join(self.config['fmriprep_out'], 'sourcedata', 'freesurfer', f'sub-{sid}')
+            self.fmriprep_out = os.path.join(self.config['fmriprep_out'], f'sub-{sid}')
+        else:
+            self.freesurfer_out = os.path.join(self.config['fmriprep_out'], 'freesurfer', f'sub-{sid}')
+            self.fmriprep_out = os.path.join(self.config['fmriprep_out'], 'fmriprep', f'sub-{sid}')
 
         self.fmriprep_fn = os.path.join(fmriprep_dir, f'{sid}.tar.lzma')
         self.freesurfer_fn = os.path.join(freesurfer_dir, f'{sid}.tar.lzma')
@@ -121,18 +125,21 @@ class PreprocessWorkflow(object):
         copy_files_to_lzma_tar(
             self.fmriprep_fn,
             [_ for _ in sorted(glob(os.path.join(self.config['fmriprep_out'], '*'))) if os.path.basename(_) != 'sourcedata'],
-            rename_func=lambda x: os.path.relpath(x, self.config['fmriprep_out']),
+            rename_func=lambda x: os.path.relpath(x, os.path.dirname(self.fmriprep_out)),
+            # rename_func=lambda x: os.path.relpath(x, self.config['fmriprep_out']),
             exclude = lambda fn: fn.endswith('space-MNI152NLin2009cAsym_res-1_desc-preproc_bold.nii.gz')
         )
         copy_files_to_lzma_tar(
             self.freesurfer_fn,
             [self.freesurfer_out],
-            rename_func=lambda x: os.path.relpath(x, os.path.join(self.config['fmriprep_out'], 'sourcedata', 'freesurfer'))
+            rename_func=lambda x: os.path.relpath(x, os.path.dirname(self.freesurfer_out)),
+            # os.path.join(self.config['fmriprep_out'], 'sourcedata', 'freesurfer')
         )
         copy_files_to_lzma_tar(
             self.summary_fn,
             [self.fmriprep_out + '.html'] + sorted(glob(os.path.join(self.fmriprep_out, 'figures', '*'))),
-            rename_func=lambda x: os.path.relpath(x, self.config['fmriprep_out']),
+            # rename_func=lambda x: os.path.relpath(x, self.config['fmriprep_out']),
+            rename_func=lambda x: os.path.relpath(x, os.path.dirname(self.fmriprep_out)),
         )
         copy_files_to_lzma_tar(
             self.confounds_fn,
