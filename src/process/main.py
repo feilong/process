@@ -25,6 +25,7 @@ class PreprocessWorkflow(object):
         summary_dir = self.config['output_summary_root']
         confounds_dir = os.path.join(self.config['output_root'], 'confounds')
         self.resample_dir = os.path.join(self.config['output_data_root'], 'resampled')
+        self.xform_dir = os.path.join(self.config['output_data_root'], 'xforms')
         self.confound_dir = os.path.join(self.config['output_data_root'], 'confounds')
         for dir_name in [self.log_dir, fmriprep_dir, freesurfer_dir, summary_dir, confounds_dir, self.confound_dir]:
             os.makedirs(dir_name, exist_ok=True)
@@ -95,11 +96,16 @@ class PreprocessWorkflow(object):
             exit(1)
         return success
 
-    def _run_fmriprep(self):
+    def _run_fmriprep(self, anat_only=False):
         sid = self.sid
-        cmd = fmriprep_cmd(self.config)
-        stdout_fn = os.path.join(self.log_dir, f'{sid}_fmriprep_stdout.txt')
-        stderr_fn = os.path.join(self.log_dir, f'{sid}_fmriprep_stderr.txt')
+        additional_options = ['--anat-only'] if anat_only else []
+        cmd = fmriprep_cmd(self.config, *additional_options)
+        if anat_only:
+            stdout_fn = os.path.join(self.log_dir, f'{sid}_anatonly_stdout.txt')
+            stderr_fn = os.path.join(self.log_dir, f'{sid}_anatonly_stderr.txt')
+        else:
+            stdout_fn = os.path.join(self.log_dir, f'{sid}_fmriprep_stdout.txt')
+            stderr_fn = os.path.join(self.log_dir, f'{sid}_fmriprep_stderr.txt')
         with open(stdout_fn, 'w') as f1, open(stderr_fn, 'w') as f2:
             proc = subprocess.run(cmd, stdout=f1, stderr=f2)
 
@@ -113,7 +119,7 @@ class PreprocessWorkflow(object):
     def _run_resample(self, filter_):
         resample_workflow(
             sid=self.sid, bids_dir=self.config['bids_dir'],
-            fs_dir=self.freesurfer_out, wf_root=self.work_out, out_dir=self.resample_dir,
+            fs_dir=self.freesurfer_out, wf_root=self.work_out, out_dir=self.resample_dir, xform_dir=self.xform_dir,
             n_jobs=self.config['n_procs'], combinations=self.config['combinations'], filter_=filter_)
         return True, ''
 
