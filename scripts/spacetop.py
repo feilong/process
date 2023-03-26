@@ -46,7 +46,6 @@ Experienced weird SDC results, switching to fMRIPrep 20.2.7.
 
 if __name__ == '__main__':
     dset = 'spacetop'
-    # fmriprep_version = '22.1.0-fix'
     fmriprep_version = '20.2.7'
     bids_dir = os.path.realpath(os.path.expanduser(f'~/lab/BIDS/{dset}'))
     n_procs = 40 if os.uname()[1].startswith('ndoli') else int(os.environ['SLURM_CPUS_PER_TASK'])
@@ -56,8 +55,6 @@ if __name__ == '__main__':
 
     idx = int(sys.argv[1])
     sid = sids[idx]
-    # sid = '0031'
-    # sid = '0033'
     print(sid, sids.index(sid), len(sids))
 
     config = {
@@ -95,7 +92,6 @@ if __name__ == '__main__':
     }
     if not os.uname()[1].startswith('ndoli'):
         config['fmriprep_options'] += ['--mem_mb', str(8000*n_procs)]
-        # assert shutil.disk_usage('/scratch').free > 5e11
 
     combinations = []
     for space in ['fsavg-ico32', 'onavg-ico32', 'onavg-ico48', 'onavg-ico64']:
@@ -106,31 +102,8 @@ if __name__ == '__main__':
     config['combinations'].append(('fsavg-ico32', '2step_normals-equal_nnfr'))
 
     wf = PreprocessWorkflow(config)
-    # if not fmriprep_success(1, os.path.join(wf.log_dir, f'{wf.sid}_fmriprep_stdout.txt'), wf.fmriprep_out):
-    #     wf.fmriprep()
     wf.fmriprep(anat_only=True)
     wf.xform()
     # wf.resample()
     # wf.compress()
     # wf.confound()
-
-
-    # run_fmriprep(config, cleanup=False)
-
-    # run_fmriprep(config, cleanup=True)
-
-    # combinations = []
-    # for space in ['fsavg-ico32', 'fsavg-ico64', 'fslr-ico32', 'fslr-ico64', 'onavg-ico32', 'onavg-ico64']:
-    #     combinations.append((space, '1step_pial_area'))
-    # for step in ['1step', '2step']:
-    #     for projection_type in ['normals_equal', 'pial']:
-    #         for resample_method in ['nnfr', 'area']:
-    #             flavor = f'{step}_{projection_type}_{resample_method}'
-    #             key = ('onavg-ico64', flavor)
-    #             if key not in combinations:
-    #                 combinations.append(key)
-
-    # for space, resample_flavor in combinations:
-    #     out_dir = os.path.expanduser(f'~/singularity_home/data/final/forrest_{fmriprep_version}/{space}/{resample_flavor}/no-gsr')
-    #     print(out_dir)
-    #     regression_workflow(config, out_dir, rename_func, space, resample_flavor, n_jobs=n_procs, ignore_non_existing=True)
