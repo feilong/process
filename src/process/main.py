@@ -7,6 +7,7 @@ from .fmriprep import fmriprep_cmd, fmriprep_success
 from .compression import copy_files_to_lzma_tar
 from .resample_workflow import resample_workflow
 from .confound import confound_workflow
+from .surface import xform_workflow
 
 
 class PreprocessWorkflow(object):
@@ -64,6 +65,8 @@ class PreprocessWorkflow(object):
 
         if name == 'fmriprep':
             step = self._run_fmriprep
+        elif name == 'xform':
+            step = self._run_xform
         elif name == 'resample':
             step = self._run_resample
         elif name == 'compress':
@@ -116,6 +119,12 @@ class PreprocessWorkflow(object):
             str(self.config), str(cmd), ' '.join(cmd)])
         return success, message
 
+    def _run_xform(self):
+        xform_workflow(
+            self.sid, fs_dir=self.freesurfer_out, xform_dir=self.xform_dir,
+            combinations=self.config['combinations'])
+        return True, ''
+
     def _run_resample(self, filter_):
         resample_workflow(
             sid=self.sid, bids_dir=self.config['bids_dir'],
@@ -163,8 +172,11 @@ class PreprocessWorkflow(object):
         else:
             return False, 'Not all output files exist.'
 
-    def fmriprep(self):
-        return self._run_method('fmriprep')
+    def fmriprep(self, **kwargs):
+        return self._run_method('fmriprep', **kwargs)
+
+    def xform(self):
+        return self._run_method('xform')
 
     def resample(self, filter_=None):
         return self._run_method('resample', filter_=filter_)

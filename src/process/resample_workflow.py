@@ -1,6 +1,7 @@
 import os
 from glob import glob
 import numpy as np
+import scipy.sparse as sparse
 import nibabel as nib
 import nitransforms as nt
 from joblib import Parallel, delayed
@@ -117,6 +118,18 @@ class FunctionalRun(object):
         warp_fns = sorted(glob(f'{self.wf_dir}/unwarp_wf/resample/vol*_xfm.nii.gz'))
         if len(warp_fns):
             assert self.nt == len(warp_fns)
+        else:
+            warp_fns = sorted(glob(f'{self.wf_dir}/sdc_estimate_wf/fmap2field_wf/vsm2dfm/*_sdcwarp.nii.gz'))
+            if len(warp_fns) == 0:
+                warp_fns = sorted(glob(f'{self.wf_dir}/sdc_estimate_wf/syn_sdc_wf/syn/ants_susceptibility0Warp.nii.gz'))
+            if len(warp_fns) == 0:
+                warp_fns = sorted(glob(f'{self.wf_dir}/sdc_estimate_wf/pepolar_unwarp_wf/cphdr_warp/_warpfieldQwarp_PLUS_WARP_fixhdr.nii.gz'))
+            if len(warp_fns) == 1:
+                warp_fns = warp_fns * self.nt
+            else:
+                print(self.wf_dir)
+                print(warp_fns)
+                raise Exception
 
         self.nii_data, self.nii_affines = [], []
         for i, nii_fn in enumerate(nii_fns):
@@ -134,7 +147,14 @@ class FunctionalRun(object):
         else:
             self.warp_data, self.warp_affines = None, None
 
-        nii = nib.load(f'{self.wf_dir}/bold_t1_trans_wf/merge/vol0000_xform-00000_clipped_merged.nii')
+        fn1 = f'{self.wf_dir}/bold_t1_trans_wf/merge/vol0000_xform-00000_clipped_merged.nii'
+        fn2 = f'{self.wf_dir}/bold_t1_trans_wf/merge/vol0000_xform-00000_merged.nii'
+        if os.path.exists(fn1):
+            nii = nib.load(fn1)
+        elif os.path.exists(fn2):
+            nii = nib.load(fn2)
+        else:
+            raise Exception(f'Neither {fn1} nor {fn2} exists.')
         self.nii_t1 = np.asarray(nii.dataobj)
         self.nii_t1 = [self.nii_t1[..., _] for _ in range(self.nii_t1.shape[-1])]
         self.nii_t1_affine = nii.affine
@@ -298,6 +318,8 @@ def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
                 sphere_fn = f'{tmpl_dir}/{name}_{lr}h_sphere.npz'
 
                 xform = subj.hemispheres[lr].get_transformation(sphere_fn, space, resample)
+                if resample in ['area', 'overlap']:
+                    xform = sparse.diags(np.reciprocal(xform.sum(axis=1).A.ravel())) @ xform
                 callback = lambda x: x.mean(axis=1) @ xform
                 funcs.append(callback)
                 combine_funcs.append(None)
@@ -409,7 +431,7 @@ def dc_sum(in_fns):
 
 
 def resample_workflow(
-        sid, bids_dir, fs_dir, wf_root, out_dir,
+        sid, bids_dir, fs_dir, wf_root, out_dir, xform_dir,
         combinations=[
             ('onavg-ico32', '1step_pial_area'),
         ],
@@ -436,5 +458,26 @@ def resample_workflow(
 
     subj = Subject(sid, fs_dir=fs_dir, wf_root=wf_root, mni_hdf5=mni_hdf5, do_surf=True, do_canonical=True, do_mni=True)
     subj.export_canonical(out_dir=out_dir)
+
+    tmpl_dir=os.path.expanduser('~/surface_template/lab/final')
+    for space, onestep, proj, resample in combinations:
+        for lr in 'lr':
+            a, b = space.split('-')
+            if a == 'fsavg':
+                name = 'fsaverage_' + b
+            elif a == 'onavg':
+                name = 'on-avg-1031-final_' + b
+            else:
+                name = space
+            sphere_fn = f'{tmpl_dir}/{name}_{lr}h_sphere.npz'
+
+            xform_fn = os.path.join(xform_dir, space, f'{sid}_{resample}_{lr}h.npz')
+            if not os.path.exists(xform_fn):
+                os.makedirs(os.path.dirname(xform_fn), exist_ok=True)
+                xform = subj.hemispheres[lr].get_transformation(sphere_fn, space, resample)
+                sparse.save_npz(xform_fn, xform)
+            else:
+                subj.hemispheres[lr].native[f'to_{space}_{resample}'] = sparse.load_npz(xform_fn)
+
     for label in labels:
         workflow_single_run(label, sid, wf_root, out_dir, combinations, subj, n_jobs=n_jobs)

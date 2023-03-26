@@ -9,10 +9,13 @@ import nibabel as nib
 import nitransforms as nt
 from joblib import Parallel, delayed
 
-from surface import Surface, barycentric_resample
+# from surface import Surface, barycentric_resample
 from surface.mapping import compute_transformation
 
 from .resample import parse_warp_image
+
+from neuroboros.surface import Surface, Sphere
+from neuroboros.surface.voronoi import compute_overlap, subdivision_voronoi, native_voronoi, subdivide_edges, inverse_face_mapping
 
 
 def compute_vertex_normals_sine_weight(coords, faces):
@@ -81,7 +84,8 @@ def nnfr_transformation(source_sphere, target_sphere, reverse=True):
 def vertex_area_transformation(source_sphere, source_faces, target_sphere, source_mid):
     T = compute_transformation(
         source_sphere, source_faces, target_sphere, source_mid)
-    T = sparse.diags(np.reciprocal(T.sum(axis=1).A.ravel())) @ T
+    T.data /= 6.
+    # T = sparse.diags(np.reciprocal(T.sum(axis=1).A.ravel())) @ T
     return T
 
 
@@ -163,6 +167,36 @@ class Hemisphere(object):
 
         return space[f'coords_{kind}']
 
+    def prepare_overlap_transformation(self, n_div=8):
+        if 'nn' in self.native:
+            return
+        mid = Surface(self.native['midthickness'], self.native['faces'])
+        self.native['face_areas'] = mid.face_areas
+        new_coords, self.native['e_mapping'], self.native['neighbors'] = subdivide_edges(
+            mid.coords, mid.faces, n_div=n_div)
+        self.native['coords'] = np.concatenate([mid.coords, new_coords], axis=0)
+        self.native['nn'], self.native['nnd'] = native_voronoi(
+            self.native['coords'], mid.faces, self.native['e_mapping'], self.native['neighbors'])
+
+    def compute_overlap_transformation(self, tmpl_coords):
+        # tmpl_coords = np.load(sphere_fn)['coords']
+        sphere = Sphere(self.native['sphere.reg'], self.native['faces'])
+        f_indices, weights = sphere.barycentric(tmpl_coords, return_sparse=False, eps=1e-7)
+        nn, nnd = subdivision_voronoi(
+            self.native['coords'], self.native['faces'],
+            self.native['e_mapping'], self.native['neighbors'],
+            f_indices, weights)
+        f_inv = inverse_face_mapping(
+            f_indices, weights, self.native['coords'], self.native['faces'])
+        T = compute_overlap(
+            self.native['faces'], self.native['face_areas'],
+            self.native['e_mapping'], self.native['coords'],
+            self.native['nn'], self.native['nnd'], {},
+            nn, nnd, f_inv, self.native['midthickness'].shape[0], tmpl_coords.shape[0],
+        )
+        # T = sparse.diags(np.reciprocal(T.sum(axis=1).A.ravel())) @ T
+        return T
+
     def get_transformation(self, sphere_fn, name, method):
         key = f'to_{name}_{method}'
         if key in self.native:
@@ -177,4 +211,34 @@ class Hemisphere(object):
         elif method == 'area':
             self.native[key] = vertex_area_transformation(
                 sphere, self.native['faces'], getattr(self, f'{name}_sphere'), self.native['midthickness'])
+        elif method == 'overlap':
+            self.prepare_overlap_transformation()
+            self.native[key] = self.compute_overlap_transformation(getattr(self, f'{name}_sphere'))
         return self.native[key]
+
+
+def xform_workflow(sid, fs_dir, xform_dir, combinations, tmpl_dir=os.path.expanduser('~/surface_template/lab/final')):
+    pairs = set()
+    for a, b in combinations[::-1]:
+        b, c = b.split('_', 1)
+        c, d = c.rsplit('_', 1)
+        pairs.add((a, d)) # (space, resample)
+
+    for lr in 'lr':
+        hemi = Hemisphere(lr, fs_dir)
+
+        for space, resample in pairs:
+            a, b = space.split('-')
+            if a == 'fsavg':
+                name = 'fsaverage_' + b
+            elif a == 'onavg':
+                name = 'on-avg-1031-final_' + b
+            else:
+                name = space
+            sphere_fn = f'{tmpl_dir}/{name}_{lr}h_sphere.npz'
+
+            xform_fn = os.path.join(xform_dir, space, f'{sid}_{resample}_{lr}h.npz')
+            if not os.path.exists(xform_fn):
+                os.makedirs(os.path.dirname(xform_fn), exist_ok=True)
+                xform = hemi.get_transformation(sphere_fn, space, resample)
+                sparse.save_npz(xform_fn, xform)
