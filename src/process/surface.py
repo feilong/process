@@ -228,6 +228,8 @@ def xform_workflow(sid, fs_dir, xform_dir, combinations, tmpl_dir=os.path.expand
         hemi = Hemisphere(lr, fs_dir)
 
         for space, resample in pairs:
+            if space == 'native':
+                continue
             a, b = space.split('-')
             if a == 'fsavg':
                 name = 'fsaverage_' + b

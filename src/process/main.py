@@ -48,11 +48,12 @@ class PreprocessWorkflow(object):
         self.summary_fn = os.path.join(summary_dir, f'{sid}.tar.lzma')
         self.confounds_fn = os.path.join(confounds_dir, f'{sid}.tar.lzma')
     
-    def _run_method(self, name='fmriprep', **kwargs):
+    def _run_method(self, name='fmriprep', log_name=None, **kwargs):
         sid = self.sid
-        finish_fn = f'{self.log_dir}/{sid}_{name}_finish.txt'
-        running_fn = f'{self.log_dir}/{sid}_{name}_running.txt'
-        error_fn = f'{self.log_dir}/{sid}_{name}_error.txt'
+        log_name = name if log_name is None else log_name
+        finish_fn = f'{self.log_dir}/{sid}_{log_name}_finish.txt'
+        running_fn = f'{self.log_dir}/{sid}_{log_name}_running.txt'
+        error_fn = f'{self.log_dir}/{sid}_{log_name}_error.txt'
 
         if os.path.exists(finish_fn):
             return True
@@ -99,16 +100,16 @@ class PreprocessWorkflow(object):
             exit(1)
         return success
 
-    def _run_fmriprep(self, anat_only=False):
+    def _run_fmriprep(self, anat_only=False, log_name=None, additional_options=None):
         sid = self.sid
-        additional_options = ['--anat-only'] if anat_only else []
+        if additional_options is None:
+            additional_options = []
+        additional_options += ['--anat-only'] if anat_only else []
         cmd = fmriprep_cmd(self.config, *additional_options)
-        if anat_only:
-            stdout_fn = os.path.join(self.log_dir, f'{sid}_anatonly_stdout.txt')
-            stderr_fn = os.path.join(self.log_dir, f'{sid}_anatonly_stderr.txt')
-        else:
-            stdout_fn = os.path.join(self.log_dir, f'{sid}_fmriprep_stdout.txt')
-            stderr_fn = os.path.join(self.log_dir, f'{sid}_fmriprep_stderr.txt')
+        if log_name is None:
+            log_name = 'anatonly' if anat_only else 'fmriprep'
+        stdout_fn = os.path.join(self.log_dir, f'{sid}_{log_name}_stdout.txt')
+        stderr_fn = os.path.join(self.log_dir, f'{sid}_{log_name}_stderr.txt')
         with open(stdout_fn, 'w') as f1, open(stderr_fn, 'w') as f2:
             proc = subprocess.run(cmd, stdout=f1, stderr=f2)
 
@@ -172,8 +173,10 @@ class PreprocessWorkflow(object):
         else:
             return False, 'Not all output files exist.'
 
-    def fmriprep(self, **kwargs):
-        return self._run_method('fmriprep', **kwargs)
+    def fmriprep(self, log_name=None, **kwargs):
+        if 'anat_only' in kwargs and kwargs['anat_only'] and log_name is None:
+            log_name = 'anatonly'
+        return self._run_method('fmriprep', log_name=log_name, **kwargs)
 
     def xform(self):
         return self._run_method('xform')

@@ -308,6 +308,12 @@ def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
             for sel in selected:
                 space, resample, out_fn = sel[2:]
 
+                if space == 'native':
+                    funcs.append(lambda x: x.mean(axis=1))
+                    combine_funcs.append(None)
+                    out_fns.append(out_fn)
+                    continue
+
                 a, b = space.split('-')
                 if a == 'fsavg':
                     name = 'fsaverage_' + b
@@ -461,6 +467,8 @@ def resample_workflow(
 
     tmpl_dir=os.path.expanduser('~/surface_template/lab/final')
     for space, onestep, proj, resample in combinations:
+        if space == 'native':
+            continue
         for lr in 'lr':
             a, b = space.split('-')
             if a == 'fsavg':
