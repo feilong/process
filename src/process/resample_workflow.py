@@ -1,5 +1,6 @@
 import os
 from glob import glob
+from functools import partial
 import numpy as np
 import scipy.sparse as sparse
 import nibabel as nib
@@ -9,6 +10,10 @@ from joblib import Parallel, delayed
 from .surface import Hemisphere
 from .volume import mni_affine, mni_coords, find_truncation_boundaries, canonical_volume_coords, aseg_mapping, extract_data_in_mni
 from .resample import parse_combined_hdf5, compute_warp, parse_warp_image, interpolate
+
+
+def _average_function(X, xform):
+    return X.mean(axis=1) @ xform
 
 
 class Subject(object):
@@ -235,7 +240,7 @@ def _run_jobs_and_combine(jobs, callback, combine_funcs, n_jobs):
     n_batches = len(jobs) // n_jobs + int(len(jobs) % n_jobs > 0)
     batch_indices = np.array_split(np.arange(len(jobs)), n_batches)
     results = []
-    with Parallel(n_jobs=n_jobs, verbose=1) as parallel:
+    with Parallel(n_jobs=n_jobs, verbose=0) as parallel:
         for idx in batch_indices:
             batch = [jobs[_] for _ in idx]
             res = parallel(batch)
@@ -326,7 +331,7 @@ def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
                 xform = subj.hemispheres[lr].get_transformation(sphere_fn, space, resample)
                 if resample in ['area', 'overlap']:
                     xform = sparse.diags(np.reciprocal(xform.sum(axis=1).A.ravel())) @ xform
-                callback = lambda x: x.mean(axis=1) @ xform
+                callback = partial(_average_function, xform=xform)
                 funcs.append(callback)
                 combine_funcs.append(None)
                 out_fns.append(out_fn)
