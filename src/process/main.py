@@ -8,6 +8,7 @@ from .compression import copy_files_to_lzma_tar
 from .resample_workflow import resample_workflow
 from .confound import confound_workflow
 from .surface import xform_workflow
+from .archive import archive_subject_work_dir
 
 
 class PreprocessWorkflow(object):
@@ -76,6 +77,8 @@ class PreprocessWorkflow(object):
             step = self._run_cleanup
         elif name == 'confound':
             step = self._run_confound
+        elif name == 'archive':
+            step = self._run_archive
         else:
             raise ValueError
         try:
@@ -164,6 +167,19 @@ class PreprocessWorkflow(object):
         )
         return True, ''
 
+    def _run_archive(self, filter_=None):
+        sid = self.sid
+        bids_dir=self.config['bids_dir']
+        raw_bolds = sorted(glob(f'{bids_dir}/sub-{sid}/ses-*/func/*_bold.nii.gz')) + \
+            sorted(glob(f'{bids_dir}/sub-{sid}/func/*_bold.nii.gz'))
+        if filter_ is not None:
+            raw_bolds = filter_(raw_bolds)
+        labels = [os.path.basename(_).split(f'sub-{sid}_', 1)[1].rsplit('_bold.nii.gz', 1)[0] for _ in raw_bolds]
+        wf_root = self.work_out
+        out_dir = os.path.join(self.config['output_root'], 'fp_work')
+        archive_subject_work_dir(self.sid, labels, wf_root, out_dir)
+        return True, ''
+
     def _run_cleanup(self):
         if all([os.path.exists(_) for _ in [self.fmriprep_fn, self.freesurfer_fn, self.summary_fn, self.confounds_fn]]):
             for root in [self.config['fmriprep_out'], self.config['fmriprep_work']]:
@@ -192,3 +208,6 @@ class PreprocessWorkflow(object):
 
     def confound(self):
         return self._run_method('confound')
+
+    def archive(self):
+        return self._run_method('archive')
