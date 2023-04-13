@@ -9,6 +9,7 @@ from .resample_workflow import resample_workflow
 from .confound import confound_workflow
 from .surface import xform_workflow
 from .archive import archive_subject_work_dir
+from .anatomy import run_freesurfer_invivo_v1, resample_freesurfer
 
 
 class PreprocessWorkflow(object):
@@ -28,6 +29,7 @@ class PreprocessWorkflow(object):
         confounds_dir = os.path.join(self.config['output_root'], 'confounds')
         self.resample_dir = os.path.join(self.config['output_data_root'], 'resampled')
         self.xform_dir = os.path.join(self.config['output_data_root'], 'xforms')
+        self.anat_dir = os.path.join(self.config['output_data_root'], 'anatomy')
         self.confound_dir = os.path.join(self.config['output_data_root'], 'confounds')
         for dir_name in [self.log_dir, fmriprep_dir, freesurfer_dir, summary_dir, confounds_dir, self.confound_dir]:
             os.makedirs(dir_name, exist_ok=True)
@@ -79,6 +81,8 @@ class PreprocessWorkflow(object):
             step = self._run_confound
         elif name == 'archive':
             step = self._run_archive
+        elif name == 'anatomy':
+            step = self._run_anatomy
         else:
             raise ValueError
         try:
@@ -122,6 +126,14 @@ class PreprocessWorkflow(object):
             f"{self.config['dset']}, {sid}, {proc.returncode}",
             str(self.config), str(cmd), ' '.join(cmd)])
         return success, message
+
+    def _run_anatomy(self):
+        proc = run_freesurfer_invivo_v1(self.config, self.log_dir)
+        if proc.returncode == 0:
+            resample_freesurfer(self.config, self.anat_dir, self.xform_dir)
+            return True, ''
+        else:
+            return False, ''
 
     def _run_xform(self):
         xform_workflow(
@@ -209,5 +221,8 @@ class PreprocessWorkflow(object):
     def confound(self):
         return self._run_method('confound')
 
-    def archive(self):
-        return self._run_method('archive')
+    def archive(self, filter_=None):
+        return self._run_method('archive', filter_=filter_)
+
+    def anatomy(self):
+        return self._run_method('anatomy')
