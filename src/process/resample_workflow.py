@@ -6,6 +6,7 @@ import scipy.sparse as sparse
 import nibabel as nib
 import nitransforms as nt
 from joblib import Parallel, delayed
+from functools import partial
 
 from .surface import Hemisphere
 from .volume import mni_affine, mni_coords, find_truncation_boundaries, canonical_volume_coords, aseg_mapping, extract_data_in_mni
@@ -355,7 +356,8 @@ def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
             continue
         for out_fn in out_fns:
             os.makedirs(os.path.dirname(out_fn), exist_ok=True)
-        callback = lambda x: extract_data_in_mni(x, mm=mm, cortex=True)
+        # callback = lambda x: extract_data_in_mni(x, mm=mm, cortex=True)
+        callback = partial(extract_data_in_mni, mm=mm, cortex=True)
         todo.append(mm)
         funcs.append(callback)
         combine_funcs.append(None)
