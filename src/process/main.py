@@ -10,6 +10,7 @@ from .confound import confound_workflow
 from .surface import xform_workflow
 from .archive import archive_subject_work_dir
 from .anatomy import run_freesurfer_invivo_v1, resample_freesurfer
+from .t2star import t2smap_cmd
 
 
 class PreprocessWorkflow(object):
@@ -83,6 +84,8 @@ class PreprocessWorkflow(object):
             step = self._run_archive
         elif name == 'anatomy':
             step = self._run_anatomy
+        elif name == 't2star':
+            step = self._run_t2star
         else:
             raise ValueError
         try:
@@ -126,6 +129,27 @@ class PreprocessWorkflow(object):
             f"{self.config['dset']}, {sid}, {proc.returncode}",
             str(self.config), str(cmd), ' '.join(cmd)])
         return success, message
+
+    def _run_t2star(self):
+        sid = self.sid
+        bids_dir = self.config['bids_dir']
+        wf_root = self.work_out
+
+        raw_bolds = sorted(glob(f'{bids_dir}/sub-{sid}/ses-*/func/*_echo-1_bold.nii.gz')) + \
+            sorted(glob(f'{bids_dir}/sub-{sid}/func/*_echo-1_bold.nii.gz'))
+        labels = [os.path.basename(_).split(f'sub-{sid}_', 1)[1].rsplit('_bold.nii.gz', 1)[0] for _ in raw_bolds]
+
+        success = True
+        for label in labels:
+            label2 = label.replace('-', '_')
+            wf_dir = (f'{wf_root}/func_preproc_{label2}_wf')
+            cmd = t2smap_cmd(self.config, wf_dir)
+            proc = subprocess.run(cmd)
+            if proc.returncode != 0:
+                success = False
+                print(proc.stdout)
+                print(proc.stderr)
+        return success, ''
 
     def _run_anatomy(self):
         proc = run_freesurfer_invivo_v1(self.config, self.log_dir)
@@ -209,8 +233,8 @@ class PreprocessWorkflow(object):
     def xform(self):
         return self._run_method('xform')
 
-    def resample(self, filter_=None):
-        return self._run_method('resample', filter_=filter_)
+    def resample(self, filter_=None, log_name=None):
+        return self._run_method('resample', filter_=filter_, log_name=log_name)
 
     def compress(self):
         return self._run_method('compress')
@@ -221,8 +245,11 @@ class PreprocessWorkflow(object):
     def confound(self):
         return self._run_method('confound')
 
-    def archive(self, filter_=None):
-        return self._run_method('archive', filter_=filter_)
+    def archive(self, filter_=None, log_name=None):
+        return self._run_method('archive', filter_=filter_, log_name=log_name)
 
     def anatomy(self):
         return self._run_method('anatomy')
+
+    def t2star(self):
+        return self._run_method('t2star')
