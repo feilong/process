@@ -87,7 +87,7 @@ def resample_freesurfer(config, anat_dir, xform_dir):
                 pp = line.split()
                 d[int(pp[0])] = float(pp[4])
             for space, resample in pairs:
-                out_fn = os.path.join(anat_dir, space, resample, prob, f'{lr}h.npy')
+                out_fn = os.path.join(anat_dir, space, resample, prob, f'{sid}_{lr}h.npy')
                 if space != 'native':
                     mat = xforms[lr, space, resample][0]
                     nb.save(out_fn, d @ mat)
@@ -100,7 +100,7 @@ def resample_freesurfer(config, anat_dir, xform_dir):
             labels = nib.freesurfer.io.read_annot(fn)[0]
             uu = np.unique(labels)
             for space, resample in pairs:
-                out_fn = os.path.join(anat_dir, space, resample, atlas, f'{lr}h.npy')
+                out_fn = os.path.join(anat_dir, space, resample, atlas, f'{sid}_{lr}h.npy')
                 if space != 'native':
                     mat = xforms[lr, space, resample][0]
                     maps = []
