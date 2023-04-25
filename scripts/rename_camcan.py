@@ -77,11 +77,11 @@ if __name__ == '__main__':
 
         # Assert we have exactly 5 echoes of movie data
         assert len(fns) == 10
-        for echo in ['echo1', 'echo2', 'echo3', 'echo4', 'echo5']:
+        for echo in [1, 2, 3, 4, 5]:
             for ext in ['json', 'nii.gz']:
-                fn = os.path.join(in_dir, f'{sid}_epi_movie_{echo}.{ext}')
+                fn = os.path.join(in_dir, f'{sid}_epi_movie_echo{echo}.{ext}')
                 assert fn in fns
-                out_fn = os.path.join(out_dir, f'{sid}_task-bang_run-01_{echo}.{ext}')
+                out_fn = os.path.join(out_dir, f'{sid}_task-bang_run-01_echo-{echo}_bold.{ext}')
                 if not os.path.exists(out_fn):
                     shutil.copy2(fn, out_fn)
 
@@ -118,7 +118,7 @@ if __name__ == '__main__':
                     if tag2 == 'phasediff':
                         d['EchoTime1'] = 0.00519
                         d['EchoTime2'] = 0.00765
-                        d['IntendedFor'] = [f'func/{sid}_task-bang_run-01_echo{e}.nii.gz'
+                        d['IntendedFor'] = [f'func/{sid}_task-bang_run-01_echo-{e}_bold.nii.gz'
                             for e in [1, 2, 3, 4, 5]]
                         with open(out_fn, 'w') as f:
                             json.dump(d, f)
