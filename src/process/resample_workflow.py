@@ -130,6 +130,8 @@ class FunctionalRun(object):
                 warp_fns = sorted(glob(f'{self.wf_dir}/sdc_estimate_wf/syn_sdc_wf/syn/ants_susceptibility0Warp.nii.gz'))
             if len(warp_fns) == 0:
                 warp_fns = sorted(glob(f'{self.wf_dir}/sdc_estimate_wf/pepolar_unwarp_wf/cphdr_warp/_warpfieldQwarp_PLUS_WARP_fixhdr.nii.gz'))
+            if len(warp_fns) == 0:
+                warp_fns = sorted(glob(os.path.join(self.wf_dir, 'sdc_estimate_wf', 'fmap2field_wf', 'vsm2dfm', '*_phasediff_rads_unwrapped_recentered_filt_demean_maths_fmap_trans_rad_vsm_unmasked_desc-field_sdcwarp.nii.gz')))
             if len(warp_fns) == 1:
                 warp_fns = warp_fns * self.nt
             else:
@@ -409,6 +411,8 @@ def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
         in_fns = sorted(glob(os.path.join(
             wf_dir, 'bold_std_trans_wf', '_std_target_MNI152NLin2009cAsym.res1',
             'bold_to_std_transform', 'vol*_xform-*.nii.gz')))
+        # if len(in_fns) == 0:
+        #     continue
         output = []
         for in_fn in in_fns:
             d = np.asanyarray(nib.load(in_fn).dataobj)
@@ -425,6 +429,8 @@ def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
         in_fns = sorted(glob(os.path.join(
             wf_dir, 'bold_std_trans_wf', '_std_target_MNI152NLin2009cAsym.res1',
             'bold_to_std_transform', 'vol*_xform-*.nii.gz')))
+        # if len(in_fns) == 0:
+        #     return
         res = dc_sum(in_fns)
         img = nib.Nifti1Image(res / len(in_fns), affine=mni_affine)
         img.to_filename(out_fn)
@@ -454,6 +460,7 @@ def resample_workflow(
 
     raw_bolds = sorted(glob(f'{bids_dir}/sub-{sid}/ses-*/func/*_bold.nii.gz')) + \
         sorted(glob(f'{bids_dir}/sub-{sid}/func/*_bold.nii.gz'))
+    raw_bolds = [_ for _ in raw_bolds if '_echo-' not in _ or 'echo-1_' in _]
     if filter_ is not None:
         raw_bolds = filter_(raw_bolds)
     labels = [os.path.basename(_).split(f'sub-{sid}_', 1)[1].rsplit('_bold.nii.gz', 1)[0] for _ in raw_bolds]

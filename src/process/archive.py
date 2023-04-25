@@ -6,6 +6,7 @@ from process.compression import copy_files_to_lzma_tar
 
 
 def archive_subject_work_dir(sid, labels, wf_root, out_dir):
+    labels = [_ for _ in labels if '_echo-' not in _ or '_echo-1' in _]
     for label in labels:
         lzma_fn = os.path.join(out_dir, f'sub-{sid}_{label}.tar.lzma')
         label2 = label.replace('-', '_')
@@ -44,11 +45,19 @@ def archive_subject_work_dir(sid, labels, wf_root, out_dir):
             todos.append(parts[16])
 
             assert parts[17] == '--transform'
-            assert parts[18] in [
+            targets = [
                 os.path.realpath(os.path.join(wf_dir, 'sdc_estimate_wf', 'syn_sdc_wf', 'syn', 'ants_susceptibility0Warp.nii.gz')),
                 os.path.realpath(os.path.join(wf_dir, 'sdc_estimate_wf', 'pepolar_unwarp_wf', 'cphdr_warp', '_warpfieldQwarp_PLUS_WARP_fixhdr.nii.gz')),
-            ]
-            todos.append(parts[18])
+            ] + [os.path.realpath(_) for _ in
+                sorted(glob(os.path.join(wf_dir, 'sdc_estimate_wf', 'fmap2field_wf', 'vsm2dfm', '*_phasediff_rads_unwrapped_recentered_filt_demean_maths_fmap_trans_rad_vsm_unmasked_desc-field_sdcwarp.nii.gz')))]
+            if parts[18] != 'identity':
+                if parts[18] not in targets:
+                    print(parts[18])
+                    print(targets)
+                assert parts[18] in targets
+                todos.append(parts[18])
+            else:
+                todos += [_ for _ in targets if os.path.exists(_)]
 
             assert parts[19] == '--transform'
             assert len(parts) == 21
