@@ -73,6 +73,10 @@ def archive_subject_work_dir(sid, labels, wf_root, out_dir):
         else:
             raise Exception(f'Neither {fn1} nor {fn2} exists.')
 
+        todos += [os.path.realpath(_) for _ in sorted(glob(os.path.join(
+            wf_dir, 'bold_t2smap_wf', 't2smap_node', '*.nii.gz'
+        ))) if 'desc-optcom_bold.nii.gz' not in _]
+
         copy_files_to_lzma_tar(lzma_fn, todos, rename_func=lambda x: os.path.relpath(x, wf_root))
 
         shared_fn = os.path.join(out_dir, f'sub-{sid}_shared.tar.lzma')
