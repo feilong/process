@@ -109,35 +109,54 @@ class Subject(object):
 
 class FunctionalRun(object):
     # Temporarily removed the prefiltered data from Interpolator
-    def __init__(self, wf_dir):
+    def __init__(self, wf_dir, multiecho=False):
         self.wf_dir = wf_dir
         self.has_data = False
+        self.multiecho = multiecho
 
     def load_data(self):
-        self.hmc = nt.io.itk.ITKLinearTransformArray.from_filename(
-            f'{self.wf_dir}/bold_hmc_wf/fsl2itk/mat2itk.txt').to_ras()
+        if self.multiecho:
+            self.hmc = None
+        else:
+            self.hmc = nt.io.itk.ITKLinearTransformArray.from_filename(
+                f'{self.wf_dir}/bold_hmc_wf/fsl2itk/mat2itk.txt').to_ras()
+
         self.ref_to_t1 = nt.io.itk.ITKLinearTransform.from_filename(
             f'{self.wf_dir}/bold_reg_wf/bbreg_wf/concat_xfm/out_fwd.tfm').to_ras()
 
         nii_fns = sorted(glob(f'{self.wf_dir}/bold_split/vol*.nii.gz'))
+        if len(nii_fns) == 0:
+            nii_fns = sorted(glob(f'{self.wf_dir}/split_opt_comb/vol*.nii.gz'))
         self.nt = len(nii_fns)
-        warp_fns = sorted(glob(f'{self.wf_dir}/unwarp_wf/resample/vol*_xfm.nii.gz'))
-        if len(warp_fns):
-            assert self.nt == len(warp_fns)
+
+        if self.multiecho:
+            self.extra = {}
+            t2s_dir = os.path.join(self.wf_dir, 'bold_t2smap_wf', 't2smap_node')
+            self.extra['S0map-full'] = nib.load(os.path.join(t2s_dir, 'desc-full_S0map.nii.gz'))
+            self.extra['T2starmap-full'] = nib.load(os.path.join(t2s_dir, 'desc-full_T2starmap.nii.gz'))
+            self.extra['S0map-limited'] = nib.load(os.path.join(t2s_dir, 'S0map.nii.gz'))
+            self.extra['T2starmap-limited'] = nib.load(os.path.join(t2s_dir, 'T2starmap.nii.gz'))
+
+        if self.multiecho:
+            warp_fns = []
         else:
-            warp_fns = sorted(glob(f'{self.wf_dir}/sdc_estimate_wf/fmap2field_wf/vsm2dfm/*_sdcwarp.nii.gz'))
-            if len(warp_fns) == 0:
-                warp_fns = sorted(glob(f'{self.wf_dir}/sdc_estimate_wf/syn_sdc_wf/syn/ants_susceptibility0Warp.nii.gz'))
-            if len(warp_fns) == 0:
-                warp_fns = sorted(glob(f'{self.wf_dir}/sdc_estimate_wf/pepolar_unwarp_wf/cphdr_warp/_warpfieldQwarp_PLUS_WARP_fixhdr.nii.gz'))
-            if len(warp_fns) == 0:
-                warp_fns = sorted(glob(os.path.join(self.wf_dir, 'sdc_estimate_wf', 'fmap2field_wf', 'vsm2dfm', '*_phasediff_rads_unwrapped_recentered_filt_demean_maths_fmap_trans_rad_vsm_unmasked_desc-field_sdcwarp.nii.gz')))
-            if len(warp_fns) == 1:
-                warp_fns = warp_fns * self.nt
+            warp_fns = sorted(glob(f'{self.wf_dir}/unwarp_wf/resample/vol*_xfm.nii.gz'))
+            if len(warp_fns):
+                assert self.nt == len(warp_fns)
             else:
-                print(self.wf_dir)
-                print(warp_fns)
-                raise Exception
+                warp_fns = sorted(glob(f'{self.wf_dir}/sdc_estimate_wf/fmap2field_wf/vsm2dfm/*_sdcwarp.nii.gz'))
+                if len(warp_fns) == 0:
+                    warp_fns = sorted(glob(f'{self.wf_dir}/sdc_estimate_wf/syn_sdc_wf/syn/ants_susceptibility0Warp.nii.gz'))
+                if len(warp_fns) == 0:
+                    warp_fns = sorted(glob(f'{self.wf_dir}/sdc_estimate_wf/pepolar_unwarp_wf/cphdr_warp/_warpfieldQwarp_PLUS_WARP_fixhdr.nii.gz'))
+                if len(warp_fns) == 0:
+                    warp_fns = sorted(glob(os.path.join(self.wf_dir, 'sdc_estimate_wf', 'fmap2field_wf', 'vsm2dfm', '*_phasediff_rads_unwrapped_recentered_filt_demean_maths_fmap_trans_rad_vsm_unmasked_desc-field_sdcwarp.nii.gz')))
+                if len(warp_fns) == 1:
+                    warp_fns = warp_fns * self.nt
+                else:
+                    print(self.wf_dir)
+                    print(warp_fns)
+                    raise Exception
 
         self.nii_data, self.nii_affines = [], []
         for i, nii_fn in enumerate(nii_fns):
@@ -167,6 +186,22 @@ class FunctionalRun(object):
         self.nii_t1 = [self.nii_t1[..., _] for _ in range(self.nii_t1.shape[-1])]
         self.nii_t1_affine = nii.affine
         self.has_data = True
+
+    def interpolate_extra(
+            self, key, coords, interp_kwargs={'order': 1}, fill=np.nan, callback=None,
+        ):
+        assert self.multiecho
+        if not self.has_data:
+            self.load_data()
+
+        data = np.asarray(self.extra[key].dataobj)
+        affine = self.extra[key].affine.copy()
+        coords = coords @ self.ref_to_t1.T
+
+        results = interpolate_original_space_single_volume(
+            data, affine, coords, None, None, None, interp_kwargs, fill, callback)
+        return results
+
 
     def interpolate(
             self, coords, onestep=True, interp_kwargs={'order': 1}, fill=np.nan, callback=None,
@@ -232,7 +267,10 @@ def interpolate_original_space_single_volume(
     if warp is not None:
         diff = compute_warp(cc, warp.astype(np.float64), warp_affine)
         cc[..., :3] += diff
-    cc = cc @ (hmc.T @ np.linalg.inv(affine).T)
+    if hmc is None:
+        cc = cc @ np.linalg.inv(affine).T
+    else:
+        cc = cc @ (hmc.T @ np.linalg.inv(affine).T)
     interp = interpolate(data.astype(np.float64), cc, fill=fill, kwargs=interp_kwargs)
     interp = run_callback(interp, callback)
     return interp
@@ -264,7 +302,8 @@ def interpolate_original_space(nii_data, nii_affines, coords,
         else:
             warp, warp_affine = warp_data[i], warp_affines[i]
         job = delayed(interpolate_original_space_single_volume)(
-            data, affine, coords, warp, warp_affine, hmc[i], interp_kwargs, fill, callback)
+            data, affine, coords, warp, warp_affine, (None if hmc is None else hmc[i]),
+            interp_kwargs, fill, callback)
         jobs.append(job)
     results = _run_jobs_and_combine(jobs, callback, combine_funcs, n_jobs)
     return results
@@ -289,10 +328,13 @@ def interpolate_t1_space(nii_t1, nii_t1_affine, coords,
 
 def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
         tmpl_dir=os.path.expanduser('~/surface_template/lab/final'), n_jobs=1):
+    multiecho = ('_echo-' in label)
     label2 = label.replace('-', '_')
     wf_dir = (f'{wf_root}/func_preproc_{label2}_wf')
     assert os.path.exists(wf_dir)
-    func_run = FunctionalRun(wf_dir)
+    func_run = FunctionalRun(wf_dir, multiecho=multiecho)
+    if multiecho:
+        label = label.replace('_echo-1', '')
 
     for lr in 'lr':
         todo = []
@@ -346,6 +388,14 @@ def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
                 np.save(out_fn, resampled)
                 print(resampled.shape, resampled.dtype, out_fn)
 
+            if func_run.multiecho and onestep:
+                for extra_key in func_run.extra:
+                    output = func_run.interpolate_extra(extra_key, coords, interp_kwargs={'order': 1}, fill=np.nan, callback=funcs)
+                    for resampled, out_fn0 in zip(output, out_fns):
+                        out_fn = out_fn0[:-4] + f'_{extra_key}.npy'
+                        np.save(out_fn, resampled)
+                        print(resampled.shape, resampled.dtype, out_fn)
+
     todo = []
     funcs = []
     combine_funcs = []
@@ -385,6 +435,19 @@ def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
                 out_fn = f'{out_dir}/{space}/average-volume/{tag}/sub-{sid}_{label}.nii.gz'
                 img = nib.Nifti1Image(np.squeeze(res) / func_run.nt, affine=mni_affine)
                 img.to_filename(out_fn)
+
+        if func_run.multiecho:
+            funcs = [func for func, mm in zip(funcs, todo) if mm != 1]
+            todo = [_ for _ in todo if _ != 1]
+            print(len(funcs), todo)
+            if len(funcs):
+                for extra_key in func_run.extra:
+                    output = func_run.interpolate_extra(extra_key, coords, interp_kwargs={'order': 1}, fill=np.nan, callback=funcs)
+                    for mm, res in zip(todo, output):
+                        space = f'mni-{mm}mm'
+                        for roi, resampled in res.items():
+                            out_fn = f'{out_dir}/{space}/{roi}/{tag}/sub-{sid}_{label}_{extra_key}.npy'
+                            np.save(out_fn, resampled)
 
     tag = '1step_linear_overlap'
     space = 'canonical'
