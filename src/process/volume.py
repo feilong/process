@@ -31,7 +31,7 @@ def find_truncation_boundaries(brainmask, margin=2):
 
 def canonical_volume_coords(brainmask, margin=2):
     canonical = nib.as_closest_canonical(brainmask)
-    boundaries = find_truncation_boundaries(np.asarray(canonical.dataobj))
+    boundaries = find_truncation_boundaries(np.asarray(canonical.dataobj), margin=margin)
     coords = np.mgrid[boundaries[0, 0]:boundaries[0, 1], boundaries[1, 0]:boundaries[1, 1], boundaries[2, 0]:boundaries[2, 1], 1:2].astype(np.float64)[..., 0]
     coords = np.moveaxis(coords, 0, -1) @ canonical.affine.T
     return coords
