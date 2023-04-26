@@ -9,10 +9,12 @@ from nitransforms.io.itk import ITKCompositeH5
 def interpolate(img, ijk, fill=np.nan, kwargs={'order': 1}):
     shape = img.shape
     ijk = np.moveaxis(ijk, -1, 0)
-    if ijk.shape[0] == 4 and np.all(ijk[3] == 1):
-        ijk = ijk[:3]
+    if ijk.shape[0] == 4:
+        if np.allclose(ijk[3], 1, atol=1e-7):
+            # Sometimes t1-to-surface lta not fully orthogonal
+            ijk = ijk[:3]
     assert ijk.shape[0] == len(shape), \
-        "Shape of indices must match dimensions of input image."
+        f"Shape of indices {ijk.shape} must match dimensions of input image {shape}."
 
     if fill is not None:
         invalid = []
