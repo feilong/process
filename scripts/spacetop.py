@@ -91,19 +91,34 @@ if __name__ == '__main__':
         ],
     }
     if not os.uname()[1].startswith('ndoli'):
-        config['fmriprep_options'] += ['--mem_mb', str(8000*n_procs)]
+        # config['fmriprep_options'] += ['--mem_mb', str(8000*n_procs)]
+        config['fmriprep_options'] += ['--low-mem']
 
     combinations = []
     for space in ['fsavg-ico32', 'onavg-ico32', 'onavg-ico48', 'onavg-ico64']:
         combinations.append((space, '1step_pial_area'))
         combinations.append((space, '1step_pial_overlap'))
+    combinations.append(('native', '1step_pial_overlap'))
     config['combinations'] = combinations.copy()
     config['combinations'].append(('fsavg-ico32', '2step_normals-sine_nnfr'))
     config['combinations'].append(('fsavg-ico32', '2step_normals-equal_nnfr'))
 
+    config['fmriprep_options'] += [
+        '--bids-filter-file',
+        os.path.expanduser('~/github/process/scripts/fmriprep_spacetop_filter_faces.json')]
+    filter_ = lambda fns: [_ for _ in fns if 'ses-02' in _ and 'task-faces' in _]
+    log_name = 'faces'
+
     wf = PreprocessWorkflow(config)
-    wf.fmriprep(anat_only=True)
-    wf.xform()
-    # wf.resample()
-    # wf.compress()
-    # wf.confound()
+    assert wf.fmriprep(anat_only=True)
+    assert wf.xform()
+    assert wf.anatomy()
+
+    assert wf.fmriprep(log_name=f'{log_name}_fmriprep')
+    assert wf.archive(log_name=f'{log_name}_archive', filter_=filter_)
+    assert wf.resample(log_name=f'{log_name}_resample', filter_=filter_)
+    assert wf.partial_cleanup(log_name=f'{log_name}_cleanup', filter_=filter_)
+
+    # assert wf.confound()
+    # assert wf.compress()
+    # assert wf.cleanup()

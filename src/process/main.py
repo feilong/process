@@ -78,6 +78,8 @@ class PreprocessWorkflow(object):
             step = self._run_compress
         elif name == 'cleanup':
             step = self._run_cleanup
+        elif name == 'partial_cleanup':
+            step = self._run_partial_cleanup
         elif name == 'confound':
             step = self._run_confound
         elif name == 'archive':
@@ -225,6 +227,39 @@ class PreprocessWorkflow(object):
         else:
             return False, 'Not all output files exist.'
 
+    def _run_partial_cleanup(self, filter_):
+        sid, bids_dir = self.sid, self.config['bids_dir']
+        raw_bolds = sorted(glob(f'{bids_dir}/sub-{sid}/ses-*/func/*_bold.nii.gz')) + \
+            sorted(glob(f'{bids_dir}/sub-{sid}/func/*_bold.nii.gz'))
+        raw_bolds = filter_(raw_bolds)
+        labels = [os.path.basename(_).split(f'sub-{sid}_', 1)[1].rsplit('_bold.nii.gz', 1)[0] for _ in raw_bolds]
+        for label in labels:
+            label2 = label.replace('-', '_')
+            wf_dir = os.path.join(self.work_out, f'func_preproc_{label2}_wf')
+
+            try:
+                if os.path.exists(wf_dir):
+                    shutil.rmtree(wf_dir)
+            except Exception as e:
+                print(e)
+                return False, str(e)
+
+        fns = []
+        for suffix in [
+            '_space-MNI152NLin2009cAsym_res-1_desc-preproc_bold.nii.gz',
+            '_space-fsaverage5_hemi-R_bold.func.gii',
+            '_space-fsaverage5_hemi-L_bold.func.gii',
+        ]:
+            fns += sorted(glob(f'{self.fmriprep_out}/func/*{suffix}'))
+            fns += sorted(glob(f'{self.fmriprep_out}/ses-*/func/*{suffix}'))
+
+        fns = filter_(fns)
+        for fn in fns:
+            print(fn)
+            os.remove(fn)
+
+        return True, ''
+
     def fmriprep(self, log_name=None, **kwargs):
         if 'anat_only' in kwargs and kwargs['anat_only'] and log_name is None:
             log_name = 'anatonly'
@@ -241,6 +276,9 @@ class PreprocessWorkflow(object):
 
     def cleanup(self):
         return self._run_method('cleanup')
+
+    def partial_cleanup(self, filter_, log_name):
+        return self._run_method('partial_cleanup', filter_=filter_, log_name=log_name)
 
     def confound(self):
         return self._run_method('confound')
