@@ -30,15 +30,14 @@ def rename_func(fn):
     return label
 
 
-
 if __name__ == '__main__':
     dset = 'forrest'
-    # fmriprep_version = '22.1.0-fix'
     fmriprep_version = '20.2.7'
     bids_dir = os.path.realpath(os.path.expanduser(f'~/lab/BIDS/ds000113'))
     n_procs = 40 if os.uname()[1].startswith('ndoli') else int(os.environ['SLURM_CPUS_PER_TASK'])
 
-    sids = sorted([os.path.basename(_)[4:] for _ in glob(os.path.join(bids_dir, 'sub-*'))])
+    # sids = sorted([os.path.basename(_)[4:] for _ in glob(os.path.join(bids_dir, 'sub-*'))])
+    sids = ['01', '02', '03', '04', '05', '06', '09', '10', '14', '15', '16', '17', '18', '19', '20']
     print(sids)
 
     idx = int(sys.argv[1])
@@ -55,9 +54,9 @@ if __name__ == '__main__':
         'singularity_home': os.path.realpath(os.path.expanduser(f'~/lab/singularity_home/fmriprep')),
 
         'bids_dir': bids_dir,
-        'output_root': os.path.realpath(os.path.expanduser(f'~/lab/nb-data-archive/{dset}_{fmriprep_version}')),
-        'output_data_root': os.path.realpath(os.path.expanduser(f'~/lab/nb-data/{dset}_{fmriprep_version}')),
-        'output_summary_root': os.path.realpath(os.path.expanduser(f'~/lab/nb-data-summary/{dset}_{fmriprep_version}')),
+        'output_root': os.path.realpath(os.path.expanduser(f'~/lab/nb-data-archive/{dset}/{fmriprep_version}')),
+        'output_data_root': os.path.realpath(os.path.expanduser(f'~/lab/nb-data/{dset}/{fmriprep_version}')),
+        'output_summary_root': os.path.realpath(os.path.expanduser(f'~/lab/nb-data-summary/{dset}/{fmriprep_version}')),
         'fmriprep_out': os.path.realpath(os.path.expanduser(f'~/lab/fmriprep_out_root/{dset}_{fmriprep_version}/output_{sid}')),
         'fmriprep_work': os.path.realpath(os.path.expanduser(f'~/lab/fmriprep_work_root/{dset}_{fmriprep_version}/work_{sid}')),
 
@@ -86,38 +85,25 @@ if __name__ == '__main__':
     combinations = []
     for space in ['fsavg-ico32', 'onavg-ico32', 'onavg-ico48', 'onavg-ico64']:
         combinations.append((space, '1step_pial_area'))
+        combinations.append((space, '1step_pial_overlap'))
     config['combinations'] = combinations.copy()
     config['combinations'].append(('fsavg-ico32', '2step_normals-sine_nnfr'))
     config['combinations'].append(('fsavg-ico32', '2step_normals-equal_nnfr'))
+    config['combinations'].append(('onavg-ico32', '2step_normals-sine_nnfr'))
+    config['combinations'].append(('onavg-ico32', '2step_normals-equal_nnfr'))
 
-    # removed from filter:
-    #  "fmap": {"datatype": "fmap"},
+    filter_ = lambda fns: [_ for _ in fns if 'ses-localizer' in _ or 'ses-movie' in _]
 
     wf = PreprocessWorkflow(config)
-    # if not fmriprep_success(1, os.path.join(wf.log_dir, f'{wf.sid}_fmriprep_stdout.txt'), wf.fmriprep_out):
-    #     wf.fmriprep()
+    assert wf.fmriprep(anat_only=True)
+    assert wf.xform()
+    assert wf.anatomy()
     assert wf.fmriprep()
-    wf.resample(filter_=lambda fns: [_ for _ in fns if 'ses-localizer' in _ or 'ses-movie' in _])
-    wf.compress()
-    wf.confound()
+    assert wf.confound()
+    assert wf.compress()
+    assert wf.archive(filter_=filter_)
+    assert wf.resample(filter_=filter_)
+    assert wf.cleanup()
 
-
-    # run_fmriprep(config, cleanup=False)
-
-    # run_fmriprep(config, cleanup=True)
-
-    # combinations = []
-    # for space in ['fsavg-ico32', 'fsavg-ico64', 'fslr-ico32', 'fslr-ico64', 'onavg-ico32', 'onavg-ico64']:
-    #     combinations.append((space, '1step_pial_area'))
-    # for step in ['1step', '2step']:
-    #     for projection_type in ['normals_equal', 'pial']:
-    #         for resample_method in ['nnfr', 'area']:
-    #             flavor = f'{step}_{projection_type}_{resample_method}'
-    #             key = ('onavg-ico64', flavor)
-    #             if key not in combinations:
-    #                 combinations.append(key)
-
-    # for space, resample_flavor in combinations:
-    #     out_dir = os.path.expanduser(f'~/singularity_home/data/final/forrest_{fmriprep_version}/{space}/{resample_flavor}/no-gsr')
-    #     print(out_dir)
-    #     regression_workflow(config, out_dir, rename_func, space, resample_flavor, n_jobs=n_procs, ignore_non_existing=True)
+    # wf.unpack(filter_=filter_)
+    # assert wf.resample(filter_=filter_)
