@@ -46,6 +46,7 @@ if __name__ == '__main__':
             '--omp-nthreads', '1',
             '--nprocs', str(n_procs),
             '--random-seed', '0',
+            '--skip_bids_validation',
             '--ignore', 'slicetiming',
             '--use-syn-sdc',
             '--output-spaces', 'fsaverage5', 'MNI152NLin2009cAsym:res-1',
