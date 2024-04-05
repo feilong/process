@@ -8,7 +8,7 @@ from process.main import PreprocessWorkflow
 if __name__ == '__main__':
     dset = 'hybr'
     fmriprep_version = '20.2.7'
-    bids_dir = os.path.realpath(os.path.expanduser(f'/dartfs/rc/lab/H/HaxbyLab/xiaoxuan/pilot/Haxby/Xiaoxuan/1110_HyperBasePilot/'))
+    bids_dir = os.path.realpath(os.path.expanduser(f'~/lab/BIDS/Haxby/Xiaoxuan/1110_HyperBasePilot/'))
     n_procs = 40 if os.uname()[1].startswith('ndoli') else int(os.environ['SLURM_CPUS_PER_TASK'])
 
     sids = sorted([os.path.basename(_)[4:] for _ in glob(os.path.join(bids_dir, 'sub-*'))])
@@ -25,15 +25,15 @@ if __name__ == '__main__':
         'fmriprep_version': fmriprep_version,
         'n_procs': n_procs,
 
-        'singularity_image': os.path.realpath(os.path.expanduser(f'/dartfs/rc/lab/H/HaxbyLab/feilong/fmriprep_{fmriprep_version}.sif')),
-        'singularity_home': os.path.realpath(os.path.expanduser(f'/dartfs/rc/lab/H/HaxbyLab/feilong/singularity_home/fmriprep')),
+        'singularity_image': os.path.realpath(os.path.expanduser(f'~/lab/../feilong/fmriprep_{fmriprep_version}.sif')),
+        'singularity_home': os.path.realpath(os.path.expanduser(f'~/lab/../feilong/singularity_home/fmriprep')),
 
         'bids_dir': bids_dir,
-        'output_root': os.path.realpath(os.path.expanduser(f'/dartfs/rc/lab/H/HaxbyLab/xiaoxuan/{dset}-archive/{fmriprep_version}')),
-        'output_data_root': os.path.realpath(os.path.expanduser(f'/dartfs/rc/lab/H/HaxbyLab/xiaoxuan/{dset}/{fmriprep_version}')),
-        'output_summary_root': os.path.realpath(os.path.expanduser(f'/dartfs/rc/lab/H/HaxbyLab/xiaoxuan/{dset}-summary/{fmriprep_version}')),
-        'fmriprep_out': os.path.realpath(os.path.expanduser(f'/dartfs/rc/lab/H/HaxbyLab/xiaoxuan/fmriprep_out_root/{dset}_{fmriprep_version}/output_{sid}')),
-        'fmriprep_work': os.path.realpath(os.path.expanduser(f'/dartfs/rc/lab/H/HaxbyLab/xiaoxuan/fmriprep_work_root/{dset}_{fmriprep_version}/work_{sid}')),
+        'output_root': os.path.realpath(os.path.expanduser(f'~/lab/data-archive/{dset}/{fmriprep_version}')),
+        'output_data_root': os.path.realpath(os.path.expanduser(f'~/lab/data/{dset}/{fmriprep_version}')),
+        'output_summary_root': os.path.realpath(os.path.expanduser(f'~/lab/data-summary/{dset}-summary/{fmriprep_version}')),
+        'fmriprep_out': os.path.realpath(os.path.expanduser(f'~/lab/fmriprep_out_root/{dset}_{fmriprep_version}/output_{sid}')),
+        'fmriprep_work': os.path.realpath(os.path.expanduser(f'~/lab/fmriprep_work_root/{dset}_{fmriprep_version}/work_{sid}')),
 
         'singularity_options': [
             '-B', '/dartfs:/dartfs',
@@ -77,6 +77,3 @@ if __name__ == '__main__':
     assert wf.archive()
     assert wf.resample()
     assert wf.cleanup()
-
-    # wf.unpack(filter_=filter_)
-    # assert wf.resample(filter_=filter_)
