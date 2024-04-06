@@ -31,7 +31,7 @@ if __name__ == '__main__':
         'bids_dir': bids_dir,
         'output_root': os.path.realpath(os.path.expanduser(f'~/lab/data-archive/{dset}/{fmriprep_version}')),
         'output_data_root': os.path.realpath(os.path.expanduser(f'~/lab/data/{dset}/{fmriprep_version}')),
-        'output_summary_root': os.path.realpath(os.path.expanduser(f'~/lab/data-summary/{dset}-summary/{fmriprep_version}')),
+        'output_summary_root': os.path.realpath(os.path.expanduser(f'~/lab/data-summary/{dset}/{fmriprep_version}')),
         'fmriprep_out': os.path.realpath(os.path.expanduser(f'~/lab/fmriprep_out_root/{dset}_{fmriprep_version}/output_{sid}')),
         'fmriprep_work': os.path.realpath(os.path.expanduser(f'~/lab/fmriprep_work_root/{dset}_{fmriprep_version}/work_{sid}')),
 
