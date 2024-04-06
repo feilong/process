@@ -6,7 +6,7 @@ from process.main import PreprocessWorkflow
 
 
 if __name__ == '__main__':
-    dset = 'hybr'
+    dset = 'hybr-pilot'
     fmriprep_version = '20.2.7'
     bids_dir = os.path.realpath(os.path.expanduser(f'~/lab/BIDS/Haxby/Xiaoxuan/1110_HyperBasePilot/'))
     n_procs = 40 if os.uname()[1].startswith('ndoli') else int(os.environ['SLURM_CPUS_PER_TASK'])
