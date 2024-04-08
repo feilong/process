@@ -70,7 +70,7 @@ if __name__ == '__main__':
     wf = PreprocessWorkflow(config)
     assert wf.fmriprep(anat_only=True)
     # assert wf.xform()
-    assert wf.anatomy()
+    # assert wf.anatomy()
     assert wf.fmriprep()
     assert wf.confound()
     assert wf.compress()
