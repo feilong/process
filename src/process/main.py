@@ -2,6 +2,9 @@ import os
 import subprocess
 import shutil
 from glob import glob
+import tarfile
+from datetime import datetime
+from joblib import Parallel, delayed
 
 from .fmriprep import fmriprep_cmd, fmriprep_success
 from .compression import copy_files_to_lzma_tar
@@ -11,6 +14,15 @@ from .surface import xform_workflow
 from .archive import archive_subject_work_dir
 from .anatomy import run_freesurfer_invivo_v1, resample_freesurfer
 from .t2star import t2smap_cmd
+
+
+def unpack_lzma_file(lzma_fn, root):
+    os.makedirs(root, exist_ok=True)
+    t0 = datetime.now()
+    with tarfile.open(lzma_fn) as tf:
+        tf.extractall(root)
+    t1 = datetime.now()
+    print(t1, t1 - t0, lzma_fn, os.path.getsize(lzma_fn))
 
 
 class PreprocessWorkflow(object):
@@ -36,11 +48,11 @@ class PreprocessWorkflow(object):
             os.makedirs(dir_name, exist_ok=True)
 
         major, minor = self.config['fmriprep_version'].split('.')[:2]
-        if int(major) >= 22:
+        if major.startswith('next') or int(major) >= 22:
             self.work_out = os.path.join(config['fmriprep_work'], f'fmriprep_{major}_{minor}_wf', f'single_subject_{sid}_wf')
         else:
             self.work_out = os.path.join(config['fmriprep_work'], f'fmriprep_wf', f'single_subject_{sid}_wf')
-        if int(major) >= 21:
+        if major.startswith('next') or int(major) >= 21:
             self.freesurfer_out = os.path.join(self.config['fmriprep_out'], 'sourcedata', 'freesurfer', f'sub-{sid}')
             self.fmriprep_out = os.path.join(self.config['fmriprep_out'], f'sub-{sid}')
         else:
@@ -174,8 +186,8 @@ class PreprocessWorkflow(object):
             n_jobs=self.config['n_procs'], combinations=self.config['combinations'], filter_=filter_)
         return True, ''
 
-    def _run_confound(self):
-        confound_workflow(self.fmriprep_out, self.confound_dir)
+    def _run_confound(self, filter_):
+        confound_workflow(self.fmriprep_out, self.confound_dir, filter_=filter_)
         return True, ''
 
     def _run_compress(self):
@@ -280,8 +292,8 @@ class PreprocessWorkflow(object):
     def partial_cleanup(self, filter_, log_name):
         return self._run_method('partial_cleanup', filter_=filter_, log_name=log_name)
 
-    def confound(self):
-        return self._run_method('confound')
+    def confound(self, filter_=None, log_name=None):
+        return self._run_method('confound', filter_=filter_, log_name=log_name)
 
     def archive(self, filter_=None, log_name=None):
         return self._run_method('archive', filter_=filter_, log_name=log_name)
@@ -291,3 +303,35 @@ class PreprocessWorkflow(object):
 
     def t2star(self):
         return self._run_method('t2star')
+
+    def unpack(self, filter_=None):
+        pairs = [
+            [self.fmriprep_fn, os.path.dirname(self.fmriprep_out)],
+            [self.freesurfer_fn, os.path.dirname(self.freesurfer_out)],
+        ]
+
+        wf_root = self.work_out
+        sid = self.sid
+        bids_dir = self.config['bids_dir']
+        raw_bolds = sorted(glob(f'{bids_dir}/sub-{sid}/ses-*/func/*_bold.nii.gz')) + \
+            sorted(glob(f'{bids_dir}/sub-{sid}/func/*_bold.nii.gz'))
+        raw_bolds = raw_bolds if filter_ is None else filter_(raw_bolds)
+        out_dir = os.path.join(self.config['output_root'], 'fp_work')
+        for raw in raw_bolds:
+            label = os.path.basename(raw).split(f'sub-{sid}_', 1)[1].rsplit('_bold.nii.gz', 1)[0]
+            lzma_fn = os.path.join(out_dir, f'sub-{sid}_{label}.tar.lzma')
+            pairs.append([lzma_fn, wf_root])
+        pairs.append([os.path.join(out_dir, f'sub-{sid}_shared.tar.lzma'), wf_root])
+
+        # for lzma_fn, root in pairs:
+        #     os.makedirs(root, exist_ok=True)
+        #     t0 = datetime.now()
+        #     with tarfile.open(lzma_fn) as tf:
+        #         tf.extractall(root)
+        #     t1 = datetime.now()
+        #     print(t1, t1 - t0, lzma_fn, os.path.getsize(lzma_fn))
+
+        jobs = [delayed(unpack_lzma_file)(lzma_fn, root)
+            for lzma_fn, root in pairs]
+        with Parallel(n_jobs=-1) as parallel:
+            parallel(jobs)

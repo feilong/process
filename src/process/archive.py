@@ -11,6 +11,12 @@ def archive_subject_work_dir(sid, labels, wf_root, out_dir):
         lzma_fn = os.path.join(out_dir, f'sub-{sid}_{label}.tar.lzma')
         label2 = label.replace('-', '_')
         wf_dir = (f'{wf_root}/func_preproc_{label2}_wf')
+        if not os.path.exists(wf_dir):
+            for e in range(1, 10):
+                wf_dir_ = wf_dir.replace('_echo_1_', f'_echo_{e}_')
+                if os.path.exists(wf_dir_):
+                    wf_dir = wf_dir_
+                    break
         todos = []
 
         xform_dir = os.path.join(

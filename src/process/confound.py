@@ -7,9 +7,11 @@ import pandas as pd
 from .regression import read_nuisance_regressors, legendre_regressors
 
 
-def copy_confound_files(fmriprep_out, confounds_dir):
+def copy_confound_files(fmriprep_out, confounds_dir, filter_=None):
     in_fns = sorted(glob(os.path.join(fmriprep_out, 'func', '*.tsv'))) + \
         sorted(glob(os.path.join(fmriprep_out, 'ses-*', 'func', '*.tsv')))
+    if filter_ is not None:
+        in_fns = filter_(in_fns)
     for in_fn in in_fns:
         out_fn = os.path.join(confounds_dir, os.path.basename(in_fn))
         shutil.copy2(in_fn, out_fn)
@@ -40,7 +42,7 @@ def compute_temporal_mask(confounds_dir):
         np.save(out_fn, mask)
 
 
-def confound_workflow(fmriprep_out, confounds_dir):
-    copy_confound_files(fmriprep_out, confounds_dir)
+def confound_workflow(fmriprep_out, confounds_dir, filter_=None):
+    copy_confound_files(fmriprep_out, confounds_dir, filter_=filter_)
     compute_regressors(confounds_dir)
     compute_temporal_mask(confounds_dir)
