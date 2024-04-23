@@ -57,20 +57,20 @@ if __name__ == '__main__':
         config['fmriprep_options'] += ['--mem_mb', str(8000*n_procs)]
 
     combinations = []
-    for space in ['fsavg-ico32', 'onavg-ico32', 'onavg-ico48', 'onavg-ico64']:
-        combinations.append((space, '1step_pial_area'))
+    for space in ['fsavg-ico32', 'onavg-ico32']:
+        # combinations.append((space, '1step_pial_area'))
         combinations.append((space, '1step_pial_overlap'))
     config['combinations'] = combinations.copy()
-    config['combinations'].append(('fsavg-ico32', '2step_normals-sine_nnfr'))
-    config['combinations'].append(('fsavg-ico32', '2step_normals-equal_nnfr'))
-    config['combinations'].append(('onavg-ico32', '2step_normals-sine_nnfr'))
-    config['combinations'].append(('onavg-ico32', '2step_normals-equal_nnfr'))
+    # config['combinations'].append(('fsavg-ico32', '2step_normals-sine_nnfr'))
+    # config['combinations'].append(('fsavg-ico32', '2step_normals-equal_nnfr'))
+    # config['combinations'].append(('onavg-ico32', '2step_normals-sine_nnfr'))
+    # config['combinations'].append(('onavg-ico32', '2step_normals-equal_nnfr'))
 
 
     wf = PreprocessWorkflow(config)
     assert wf.fmriprep(anat_only=True)
-    # assert wf.xform()
-    # assert wf.anatomy()
+    assert wf.xform()
+    assert wf.anatomy()
     assert wf.fmriprep()
     assert wf.confound()
     assert wf.compress()
