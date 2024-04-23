@@ -7,6 +7,7 @@ import nibabel as nib
 import nitransforms as nt
 from joblib import Parallel, delayed
 from functools import partial
+import neuroboros as nb
 
 from .surface import Hemisphere
 from .volume import mni_affine, mni_coords, find_truncation_boundaries, canonical_volume_coords, aseg_mapping, extract_data_in_mni
@@ -98,6 +99,8 @@ class Subject(object):
                 else:
                     raise Exception(f"FreeSurfer {key} volumn not found.")
             out_fn = f'{out_dir}/canonical/average-volume/freesurfer/sub-{self.sid}_{key}.nii.gz'
+            if os.path.exists(out_fn):
+                continue
             img = nib.load(fs_fn)
             canonical = nib.as_closest_canonical(img)
             data = np.asarray(canonical.dataobj)
@@ -331,6 +334,12 @@ def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
     multiecho = ('_echo-' in label)
     label2 = label.replace('-', '_')
     wf_dir = (f'{wf_root}/func_preproc_{label2}_wf')
+    if not os.path.exists(wf_dir):
+        for e in range(1, 10):
+            wf_dir_ = wf_dir.replace('_echo_1_', f'_echo_{e}_')
+            if os.path.exists(wf_dir_):
+                wf_dir = wf_dir_
+                break
     assert os.path.exists(wf_dir)
     func_run = FunctionalRun(wf_dir, multiecho=multiecho)
     if multiecho:
@@ -364,16 +373,18 @@ def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
                     out_fns.append(out_fn)
                     continue
 
-                a, b = space.split('-')
-                if a == 'fsavg':
-                    name = 'fsaverage_' + b
-                elif a == 'onavg':
-                    name = 'on-avg-1031-final_' + b
-                else:
-                    name = space
-                sphere_fn = f'{tmpl_dir}/{name}_{lr}h_sphere.npz'
+                # a, b = space.split('-')
+                # if a == 'fsavg':
+                #     name = 'fsaverage_' + b
+                # elif a == 'onavg':
+                #     name = 'on-avg-1031-final_' + b
+                # else:
+                #     name = space
+                # sphere_fn = f'{tmpl_dir}/{name}_{lr}h_sphere.npz'
 
-                xform = subj.hemispheres[lr].get_transformation(sphere_fn, space, resample)
+                sphere_coords = nb.geometry('sphere.reg', lr, space, vertices_only=True)
+                # xform = subj.hemispheres[lr].get_transformation(sphere_fn, space, resample)
+                xform = subj.hemispheres[lr].get_transformation(sphere_coords, space, resample)
                 if resample in ['area', 'overlap']:
                     xform = sparse.diags(np.reciprocal(xform.sum(axis=1).A.ravel())) @ xform
                 callback = partial(_average_function, xform=xform)
@@ -474,8 +485,8 @@ def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
         in_fns = sorted(glob(os.path.join(
             wf_dir, 'bold_std_trans_wf', '_std_target_MNI152NLin2009cAsym.res1',
             'bold_to_std_transform', 'vol*_xform-*.nii.gz')))
-        # if len(in_fns) == 0:
-        #     continue
+        if len(in_fns) == 0:
+            continue
         output = []
         for in_fn in in_fns:
             d = np.asanyarray(nib.load(in_fn).dataobj)
@@ -492,8 +503,8 @@ def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
         in_fns = sorted(glob(os.path.join(
             wf_dir, 'bold_std_trans_wf', '_std_target_MNI152NLin2009cAsym.res1',
             'bold_to_std_transform', 'vol*_xform-*.nii.gz')))
-        # if len(in_fns) == 0:
-        #     return
+        if len(in_fns) == 0:
+            return
         res = dc_sum(in_fns)
         img = nib.Nifti1Image(res / len(in_fns), affine=mni_affine)
         img.to_filename(out_fn)
@@ -547,19 +558,20 @@ def resample_workflow(
         if space == 'native':
             continue
         for lr in 'lr':
-            a, b = space.split('-')
-            if a == 'fsavg':
-                name = 'fsaverage_' + b
-            elif a == 'onavg':
-                name = 'on-avg-1031-final_' + b
-            else:
-                name = space
-            sphere_fn = f'{tmpl_dir}/{name}_{lr}h_sphere.npz'
+            # a, b = space.split('-')
+            # if a == 'fsavg':
+            #     name = 'fsaverage_' + b
+            # elif a == 'onavg':
+            #     name = 'on-avg-1031-final_' + b
+            # else:
+            #     name = space
+            # sphere_fn = f'{tmpl_dir}/{name}_{lr}h_sphere.npz'
+            sphere_coords = nb.geometry('sphere.reg', lr, space, vertices_only=True)
 
             xform_fn = os.path.join(xform_dir, space, f'{sid}_{resample}_{lr}h.npz')
             if not os.path.exists(xform_fn):
                 os.makedirs(os.path.dirname(xform_fn), exist_ok=True)
-                xform = subj.hemispheres[lr].get_transformation(sphere_fn, space, resample)
+                xform = subj.hemispheres[lr].get_transformation(sphere_coords, space, resample)
                 sparse.save_npz(xform_fn, xform)
             else:
                 subj.hemispheres[lr].native[f'to_{space}_{resample}'] = sparse.load_npz(xform_fn)

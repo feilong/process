@@ -8,6 +8,7 @@ from scipy.ndimage import map_coordinates, spline_filter
 import nibabel as nib
 import nitransforms as nt
 from joblib import Parallel, delayed
+import neuroboros as nb
 
 # from surface import Surface, barycentric_resample
 from surface.mapping import compute_transformation
@@ -197,13 +198,15 @@ class Hemisphere(object):
         # T = sparse.diags(np.reciprocal(T.sum(axis=1).A.ravel())) @ T
         return T
 
-    def get_transformation(self, sphere_fn, name, method):
+    def get_transformation(self, coords, name, method):
         key = f'to_{name}_{method}'
         if key in self.native:
             return self.native[key]
+        if isinstance(coords, str) and coords.endswith('.npz'):
+            coords = np.load(coords)['coords']
 
         if not hasattr(self, f'{name}_sphere'):
-            setattr(self, f'{name}_sphere', np.load(sphere_fn)['coords'])
+            setattr(self, f'{name}_sphere', coords)
         sphere = self.native['sphere.reg'] / np.linalg.norm(self.native['sphere.reg'], axis=1, keepdims=True)
         if method == 'nnfr':
             self.native[key] = nnfr_transformation(
@@ -228,19 +231,21 @@ def xform_workflow(sid, fs_dir, xform_dir, combinations, tmpl_dir=os.path.expand
         hemi = Hemisphere(lr, fs_dir)
 
         for space, resample in pairs:
-            if space == 'native':
-                continue
-            a, b = space.split('-')
-            if a == 'fsavg':
-                name = 'fsaverage_' + b
-            elif a == 'onavg':
-                name = 'on-avg-1031-final_' + b
-            else:
-                name = space
-            sphere_fn = f'{tmpl_dir}/{name}_{lr}h_sphere.npz'
+            # if space == 'native':
+            #     continue
+            # a, b = space.split('-')
+            # if a == 'fsavg':
+            #     name = 'fsaverage_' + b
+            # elif a == 'onavg':
+            #     name = 'on-avg-1031-final_' + b
+            # else:
+            #     name = space
+            # sphere_fn = f'{tmpl_dir}/{name}_{lr}h_sphere.npz'
+            sphere_coords = nb.geometry('sphere.reg', lr, space, vertices_only=True)
 
             xform_fn = os.path.join(xform_dir, space, f'{sid}_{resample}_{lr}h.npz')
             if not os.path.exists(xform_fn):
                 os.makedirs(os.path.dirname(xform_fn), exist_ok=True)
-                xform = hemi.get_transformation(sphere_fn, space, resample)
+                # xform = hemi.get_transformation(sphere_fn, space, resample)
+                xform = hemi.get_transformation(sphere_coords, space, resample)
                 sparse.save_npz(xform_fn, xform)
