@@ -220,7 +220,7 @@ class Hemisphere(object):
         return self.native[key]
 
 
-def xform_workflow(sid, fs_dir, xform_dir, combinations, tmpl_dir=os.path.expanduser('~/surface_template/lab/final')):
+def xform_workflow(sid, fs_dir, xform_dir, combinations):
     pairs = set()
     for a, b in combinations[::-1]:
         b, c = b.split('_', 1)
@@ -233,19 +233,10 @@ def xform_workflow(sid, fs_dir, xform_dir, combinations, tmpl_dir=os.path.expand
         for space, resample in pairs:
             if space == 'native':
                 continue
-            # a, b = space.split('-')
-            # if a == 'fsavg':
-            #     name = 'fsaverage_' + b
-            # elif a == 'onavg':
-            #     name = 'on-avg-1031-final_' + b
-            # else:
-            #     name = space
-            # sphere_fn = f'{tmpl_dir}/{name}_{lr}h_sphere.npz'
             sphere_coords = nb.geometry('sphere.reg', lr, space, vertices_only=True)
 
             xform_fn = os.path.join(xform_dir, space, f'{sid}_{resample}_{lr}h.npz')
             if not os.path.exists(xform_fn):
                 os.makedirs(os.path.dirname(xform_fn), exist_ok=True)
-                # xform = hemi.get_transformation(sphere_fn, space, resample)
                 xform = hemi.get_transformation(sphere_coords, space, resample)
                 sparse.save_npz(xform_fn, xform)
