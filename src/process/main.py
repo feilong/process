@@ -10,7 +10,7 @@ from .fmriprep import fmriprep_cmd, fmriprep_success
 from .compression import copy_files_to_lzma_tar
 from .resample_workflow import resample_workflow
 from .confound import confound_workflow
-from .surface import xform_workflow
+from .transform import xform_workflow
 from .archive import archive_subject_work_dir
 from .anatomy import run_freesurfer_invivo_v1, resample_freesurfer
 from .t2star import t2smap_cmd

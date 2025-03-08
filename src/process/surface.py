@@ -130,25 +130,3 @@ class Hemisphere(object):
             self.prepare_overlap_transformation()
             self.native[key] = self.compute_overlap_transformation(getattr(self, f'{name}_sphere'))
         return self.native[key]
-
-
-def xform_workflow(sid, fs_dir, xform_dir, combinations):
-    pairs = set()
-    for a, b in combinations[::-1]:
-        b, c = b.split('_', 1)
-        c, d = c.rsplit('_', 1)
-        pairs.add((a, d)) # (space, resample)
-
-    for lr in 'lr':
-        hemi = Hemisphere(lr, fs_dir)
-
-        for space, resample in pairs:
-            if space == 'native':
-                continue
-            sphere_coords = nb.geometry('sphere.reg', lr, space, vertices_only=True)
-
-            xform_fn = os.path.join(xform_dir, space, f'{sid}_{resample}_{lr}h.npz')
-            if not os.path.exists(xform_fn):
-                os.makedirs(os.path.dirname(xform_fn), exist_ok=True)
-                xform = hemi.get_transformation(sphere_coords, space, resample)
-                sparse.save_npz(xform_fn, xform)
