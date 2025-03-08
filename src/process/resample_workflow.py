@@ -373,17 +373,7 @@ def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
                     out_fns.append(out_fn)
                     continue
 
-                # a, b = space.split('-')
-                # if a == 'fsavg':
-                #     name = 'fsaverage_' + b
-                # elif a == 'onavg':
-                #     name = 'on-avg-1031-final_' + b
-                # else:
-                #     name = space
-                # sphere_fn = f'{tmpl_dir}/{name}_{lr}h_sphere.npz'
-
                 sphere_coords = nb.geometry('sphere.reg', lr, space, vertices_only=True)
-                # xform = subj.hemispheres[lr].get_transformation(sphere_fn, space, resample)
                 xform = subj.hemispheres[lr].get_transformation(sphere_coords, space, resample)
                 if resample in ['area', 'overlap']:
                     xform = sparse.diags(np.reciprocal(xform.sum(axis=1).A.ravel())) @ xform
@@ -419,7 +409,6 @@ def workflow_single_run(label, sid, wf_root, out_dir, combinations, subj,
             continue
         for out_fn in out_fns:
             os.makedirs(os.path.dirname(out_fn), exist_ok=True)
-        # callback = lambda x: extract_data_in_mni(x, mm=mm, cortex=True)
         callback = partial(extract_data_in_mni, mm=mm, cortex=True)
         todo.append(mm)
         funcs.append(callback)
@@ -553,19 +542,10 @@ def resample_workflow(
     subj = Subject(sid, fs_dir=fs_dir, wf_root=wf_root, mni_hdf5=mni_hdf5, do_surf=True, do_canonical=True, do_mni=True)
     subj.export_canonical(out_dir=out_dir)
 
-    tmpl_dir=os.path.expanduser('~/surface_template/lab/final')
     for space, onestep, proj, resample in combinations:
         if space == 'native':
             continue
         for lr in 'lr':
-            # a, b = space.split('-')
-            # if a == 'fsavg':
-            #     name = 'fsaverage_' + b
-            # elif a == 'onavg':
-            #     name = 'on-avg-1031-final_' + b
-            # else:
-            #     name = space
-            # sphere_fn = f'{tmpl_dir}/{name}_{lr}h_sphere.npz'
             sphere_coords = nb.geometry('sphere.reg', lr, space, vertices_only=True)
 
             xform_fn = os.path.join(xform_dir, space, f'{sid}_{resample}_{lr}h.npz')

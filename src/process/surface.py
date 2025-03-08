@@ -1,19 +1,9 @@
 import os
-from glob import glob
-from datetime import datetime
 import numpy as np
 import scipy.sparse as sparse
-from scipy.spatial import cKDTree
-from scipy.ndimage import map_coordinates, spline_filter
 import nibabel as nib
-import nitransforms as nt
-from joblib import Parallel, delayed
 import neuroboros as nb
 
-# from surface import Surface, barycentric_resample
-# from surface.mapping import compute_transformation
-
-# from .resample import parse_warp_image
 
 from neuroboros.surface import Surface, Sphere
 from neuroboros.surface.voronoi import compute_overlap, subdivision_voronoi, native_voronoi, subdivide_edges, inverse_face_mapping
