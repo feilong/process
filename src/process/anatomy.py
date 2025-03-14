@@ -18,7 +18,7 @@ def run_freesurfer_invivo_v1(config, log_dir):
     v1_dir = os.path.join(fs_dir, 'V1_average')
     if not os.path.exists(v1_dir):
         os.symlink(
-            os.path.realpath(os.path.expanduser('/dartfs/rc/lab/H/Haxbylab/shared/freesurfer/subjects/V1_average')),
+            os.path.realpath(os.path.expanduser('/dartfs/rc/lab/H/HaxbyLab/shared/freesurfer/subjects/V1_average')),
             v1_dir)
     cmd = ['recon-all', '-label_v1', '-s', f'sub-{sid}', '-sd', fs_dir]
     stdout_fn = os.path.join(log_dir, f'{sid}_V1_stdout.txt')
