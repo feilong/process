@@ -10,6 +10,7 @@ from .fmriprep import fmriprep_cmd, fmriprep_success
 from .compression import copy_files_to_lzma_tar
 from .resample_workflow import resample_workflow
 from .confound import confound_workflow
+from .events import events_workflow
 from .transform import xform_workflow
 from .archive import archive_subject_work_dir
 from .anatomy import run_freesurfer_invivo_v1, resample_freesurfer
@@ -44,7 +45,8 @@ class PreprocessWorkflow(object):
         self.xform_dir = os.path.join(self.config['output_data_root'], 'xforms')
         self.anat_dir = os.path.join(self.config['output_data_root'], 'anatomy')
         self.confound_dir = os.path.join(self.config['output_data_root'], 'confounds')
-        for dir_name in [self.log_dir, fmriprep_dir, freesurfer_dir, summary_dir, confounds_dir, self.confound_dir]:
+        self.events_dir = os.path.join(self.config['output_data_root'], 'events')
+        for dir_name in [self.log_dir, fmriprep_dir, freesurfer_dir, summary_dir, confounds_dir, self.confound_dir, self.events_dir]:
             os.makedirs(dir_name, exist_ok=True)
 
         major, minor = self.config['fmriprep_version'].split('.')[:2]
@@ -94,6 +96,8 @@ class PreprocessWorkflow(object):
             step = self._run_partial_cleanup
         elif name == 'confound':
             step = self._run_confound
+        elif name == 'events':
+            step = self._run_events
         elif name == 'archive':
             step = self._run_archive
         elif name == 'anatomy':
@@ -188,6 +192,10 @@ class PreprocessWorkflow(object):
 
     def _run_confound(self, filter_):
         confound_workflow(self.fmriprep_out, self.confound_dir, filter_=filter_)
+        return True, ''
+
+    def _run_events(self, filter_):
+        events_workflow(self.config['bids_dir'], self.events_dir, filter_=filter_)
         return True, ''
 
     def _run_compress(self):
@@ -294,6 +302,9 @@ class PreprocessWorkflow(object):
 
     def confound(self, filter_=None, log_name=None):
         return self._run_method('confound', filter_=filter_, log_name=log_name)
+
+    def events(self, filter_=None, log_name=None):
+        return self._run_method('events', filter_=filter_, log_name=log_name)
 
     def archive(self, filter_=None, log_name=None):
         return self._run_method('archive', filter_=filter_, log_name=log_name)
