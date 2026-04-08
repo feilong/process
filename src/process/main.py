@@ -177,17 +177,20 @@ class PreprocessWorkflow(object):
         else:
             return False, ''
 
-    def _run_xform(self):
-        xform_workflow(
-            self.sid, fs_dir=self.freesurfer_out, xform_dir=self.xform_dir,
+    def _run_xform(self, **kwargs):
+        args = dict(fs_dir=self.freesurfer_out, xform_dir=self.xform_dir,
             combinations=self.config['combinations'])
+        args.update(kwargs)
+        xform_workflow(self.sid, **args)
         return True, ''
 
-    def _run_resample(self, filter_):
-        resample_workflow(
+    def _run_resample(self, filter_, **kwargs):
+        args = dict(
             sid=self.sid, bids_dir=self.config['bids_dir'],
             fs_dir=self.freesurfer_out, wf_root=self.work_out, out_dir=self.resample_dir, xform_dir=self.xform_dir,
             n_jobs=self.config['n_procs'], combinations=self.config['combinations'], filter_=filter_)
+        args.update(kwargs)
+        resample_workflow(**args)
         return True, ''
 
     def _run_confound(self, filter_):
@@ -285,11 +288,11 @@ class PreprocessWorkflow(object):
             log_name = 'anatonly'
         return self._run_method('fmriprep', log_name=log_name, **kwargs)
 
-    def xform(self):
-        return self._run_method('xform')
+    def xform(self, **kwargs):
+        return self._run_method('xform', **kwargs)
 
-    def resample(self, filter_=None, log_name=None):
-        return self._run_method('resample', filter_=filter_, log_name=log_name)
+    def resample(self, filter_=None, log_name=None, **kwargs):
+        return self._run_method('resample', filter_=filter_, log_name=log_name, **kwargs)
 
     def compress(self):
         return self._run_method('compress')
