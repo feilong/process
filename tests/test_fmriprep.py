@@ -359,3 +359,128 @@ def test_find_runs_same_transforms(dirs, names):
         find_runs(fp, bids, SID)
     keep_first = lambda fns: [_ for _ in fns if os.path.basename(_) == f'sub-{SID}_{names[0]}_bold.nii.gz']  # noqa: E731
     assert [_['label'] for _ in find_runs(fp, bids, SID, filter_=keep_first)] == [names[0]]
+
+
+# load_surfaces
+
+import nibabel as nib
+import nitransforms as nt
+import numpy as np
+
+from process.fmriprep import load_surfaces
+
+FACES = np.array([[0, 1, 2], [0, 2, 3], [0, 3, 1], [1, 3, 2]], dtype=np.int32)
+# fsnative -> T1w positions, as fMRIPrep's from-T1w_to-fsnative transform stores it
+TO_T1W = np.array([
+    [0.9998, -0.02, 0.0, 0.5],
+    [0.02, 0.9998, 0.0, -1.0],
+    [0.0, 0.0, 1.0, 2.0],
+    [0.0, 0.0, 0.0, 1.0]])
+CRAS = np.array([1.5, -20.25, 12.0])
+
+
+def _surface_coords(lr):
+    rng = np.random.default_rng('lr'.index(lr))
+    white = rng.normal(0, 30, (4, 3))
+    return white, white + rng.normal(0, 2, (4, 3))
+
+
+def _write_gifti(fn, coords):
+    os.makedirs(os.path.dirname(fn), exist_ok=True)
+    nib.save(nib.GiftiImage(darrays=[
+        nib.gifti.GiftiDataArray(coords.astype(np.float32), intent='NIFTI_INTENT_POINTSET'),
+        nib.gifti.GiftiDataArray(FACES, intent='NIFTI_INTENT_TRIANGLE')]), fn)
+
+
+def _add_gifti_surfaces(fp, ses=None, kinds=('white', 'pial')):
+    sub_ses, name = (f'sub-{SID}/ses-{ses}', f'sub-{SID}_ses-{ses}') if ses else (f'sub-{SID}', f'sub-{SID}')
+    for lr in 'lr':
+        for kind, coords in zip(('white', 'pial'), _surface_coords(lr)):
+            if kind in kinds:
+                _write_gifti(os.path.join(fp, sub_ses, 'anat', f'{name}_hemi-{lr.upper()}_{kind}.surf.gii'), coords)
+    # Other surfaces that must not be picked up
+    _write_gifti(os.path.join(fp, sub_ses, 'anat', f'{name}_hemi-L_midthickness.surf.gii'), np.zeros((4, 3)))
+    _write_gifti(os.path.join(fp, sub_ses, 'anat', f'{name}_hemi-L_space-fsLR_desc-reg_sphere.surf.gii'),
+                 np.zeros((4, 3)))
+
+
+def _add_freesurfer(fp, fs_dir, xfm=True):
+    """FreeSurfer surfaces whose T1w-space positions equal `_surface_coords`."""
+    os.makedirs(os.path.join(fs_dir, 'surf'))
+    info = {'head': np.array([2, 0, 20], dtype=np.int32), 'valid': '1  # volume info valid',
+            'filename': 'T1.mgz', 'volume': np.array([256, 256, 256]),
+            'voxelsize': np.ones(3), 'xras': np.array([-1.0, 0, 0]), 'yras': np.array([0, 0, -1.0]),
+            'zras': np.array([0, 1.0, 0]), 'cras': CRAS}
+    to_fs = np.linalg.inv(TO_T1W)
+    for lr in 'lr':
+        for kind, coords in zip(('white', 'pial'), _surface_coords(lr)):
+            tkr = coords @ to_fs[:3, :3].T + to_fs[:3, 3] - CRAS
+            nib.freesurfer.write_geometry(
+                os.path.join(fs_dir, 'surf', f'{lr}h.{kind}'), tkr, FACES, volume_info=info)
+    anat = os.path.join(fp, f'sub-{SID}', 'anat')
+    os.makedirs(anat, exist_ok=True)
+    if xfm:
+        nt.linear.Affine(TO_T1W).to_filename(
+            os.path.join(anat, f'sub-{SID}_from-T1w_to-fsnative_mode-image_xfm.txt'), fmt='itk')
+        nt.linear.Affine(to_fs).to_filename(
+            os.path.join(anat, f'sub-{SID}_from-fsnative_to-T1w_mode-image_xfm.txt'), fmt='itk')
+
+
+@pytest.mark.parametrize('ses', [None, '1'])
+@pytest.mark.parametrize('lr', ['l', 'r'])
+def test_load_surfaces(dirs, ses, lr):
+    fp, _ = dirs
+    _add_gifti_surfaces(fp, ses)
+    white, pial = load_surfaces(fp, SID, lr)
+    assert white.dtype == pial.dtype == np.float64
+    for coords, expected in zip((white, pial), _surface_coords(lr)):
+        np.testing.assert_allclose(coords, expected, atol=1e-4)  # GIFTI stores float32
+
+
+@pytest.mark.parametrize('lr', ['l', 'r'])
+def test_load_surfaces_freesurfer_fallback(dirs, tmp_path, lr):
+    fp, _ = dirs
+    fs_dir = str(tmp_path / 'freesurfer' / f'sub-{SID}')
+    _add_freesurfer(fp, fs_dir)
+    white, pial = load_surfaces(fp, SID, lr, fs_dir=fs_dir)
+    assert white.dtype == pial.dtype == np.float64
+    for coords, expected in zip((white, pial), _surface_coords(lr)):
+        np.testing.assert_allclose(coords, expected, atol=1e-3)  # float32 and ITK text precision
+
+    # fMRIPrep's surfaces are preferred when both exist
+    _add_gifti_surfaces(fp)
+    os.remove(os.path.join(fs_dir, 'surf', f'{lr}h.white'))
+    load_surfaces(fp, SID, lr, fs_dir=fs_dir)
+
+
+def test_load_surfaces_errors(dirs, tmp_path):
+    fp, _ = dirs
+    fs_dir = str(tmp_path / 'freesurfer' / f'sub-{SID}')
+    _add_freesurfer(fp, fs_dir, xfm=False)
+    with pytest.raises(ValueError, match='lr'):
+        load_surfaces(fp, SID, 'L')
+    with pytest.raises(FileNotFoundError, match='--level full'):
+        load_surfaces(fp, SID, 'l')
+    with pytest.raises(FileNotFoundError, match='T1w-to-fsnative'):
+        load_surfaces(fp, SID, 'l', fs_dir=fs_dir)
+
+    _add_gifti_surfaces(fp, kinds=('white',))
+    with pytest.raises(ValueError, match='without its counterpart'):
+        load_surfaces(fp, SID, 'l', fs_dir=fs_dir)
+    _add_gifti_surfaces(fp)
+    _add_gifti_surfaces(fp, ses='1')
+    with pytest.raises(ValueError, match='Several pairs'):
+        load_surfaces(fp, SID, 'l')
+
+
+def test_load_surfaces_no_pairing_across_sessions(dirs):
+    """White from one session and pial from another may be in different T1w frames."""
+    fp, _ = dirs
+    _add_gifti_surfaces(fp, ses='1', kinds=('white',))
+    _add_gifti_surfaces(fp, ses='2', kinds=('pial',))
+    with pytest.raises(ValueError, match='without its counterpart'):
+        load_surfaces(fp, SID, 'l')
+    # A complete pair elsewhere does not excuse the incomplete ones
+    _add_gifti_surfaces(fp)
+    with pytest.raises(ValueError, match='without its counterpart'):
+        load_surfaces(fp, SID, 'l')

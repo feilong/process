@@ -2,6 +2,10 @@ import json
 import os
 from glob import glob
 
+import nibabel as nib
+import nitransforms as nt
+import numpy as np
+
 from .bids import list_bold_runs
 
 
@@ -320,3 +324,141 @@ def find_runs(
                 'list it in no_fieldmap if fMRIPrep processed it without one')
         runs.append(run)
     return runs
+
+
+def load_surfaces(fmriprep_dir, sid, lr, *, fs_dir=None):
+    """Load the white and pial surfaces of a hemisphere in T1w space.
+
+    Prefer one complete pair of fMRIPrep GIFTI surfaces, written at
+    ``--level full``. When neither surface is found for this hemisphere,
+    optionally load the native FreeSurfer pair and map it to T1w space
+    with fMRIPrep's T1w-to-fsnative transform. Incomplete or ambiguous
+    fMRIPrep outputs raise an error instead of triggering the fallback.
+
+    Parameters
+    ----------
+    fmriprep_dir : str or os.PathLike
+        fMRIPrep derivative dataset root, containing ``sub-<sid>``.
+    sid : str
+        Subject ID without the ``sub-`` prefix.
+    lr : {'l', 'r'}
+        Hemisphere, using a lowercase letter. Uppercase values are rejected.
+    fs_dir : str or os.PathLike or None, optional
+        The individual subject's FreeSurfer directory, containing ``surf``;
+        do not pass the parent ``SUBJECTS_DIR``. Must be the reconstruction
+        associated with fMRIPrep's T1w-to-fsnative transform. Only read when
+        neither fMRIPrep surface exists for the requested hemisphere.
+        Default is None, meaning no fallback. Both directory arguments are
+        resolved against the current working directory if relative.
+
+    Returns
+    -------
+    white, pial : ndarray of float64, shape (N, 3)
+        White and pial vertex positions in that order, in fMRIPrep's T1w
+        world space (RAS+, mm), not voxel indices or FreeSurfer surface
+        RAS coordinates. Vertex order is preserved from the native meshes,
+        and both arrays have the same shape. Triangle connectivity is not
+        returned. To use :func:`process.resample.resample_run`, first form
+        sample positions of shape ``(D, N, 3)`` between these surfaces.
+
+    Raises
+    ------
+    FileNotFoundError
+        If neither fMRIPrep surface exists and ``fs_dir`` is None, or a
+        required fallback transform or FreeSurfer surface file is missing.
+    ValueError
+        If ``lr`` is invalid, a white or pial surface has no counterpart
+        with the same directory and filename prefix, several pairs or
+        transforms match, or the loaded coordinate arrays differ in shape.
+
+    See Also
+    --------
+    find_runs : Discover raw BOLD runs and their fMRIPrep transforms.
+    process.resample.resample_run : Sample a run at T1w-space positions.
+
+    Notes
+    -----
+    Files are searched in ``sub-<sid>/anat`` and ``sub-<sid>/ses-*/anat``:
+    ``*_hemi-{L,R}_{white,pial}.surf.gii``, and for the fallback
+    ``*_from-T1w_to-fsnative_mode-image_xfm.txt``. White and pial must share
+    a directory and the entire filename prefix before ``_white.surf.gii``
+    or ``_pial.surf.gii``. Every matching surface must have its counterpart,
+    and there must be exactly one pair across all searched directories.
+    A subject-level pair is not preferred over a session-level pair.
+    Separately processed sessions with multiple pairs are therefore
+    ambiguous; this function does not select an anatomical session.
+
+    GIFTI pointset arrays are already in T1w world coordinates and are read
+    directly. No additional transform is applied to them. For the fallback,
+    ``surf/<lr>h.white`` and ``surf/<lr>h.pial`` are read with their volume
+    metadata. Each surface's ``cras`` offset is added to its coordinates,
+    then the RAS+ matrix loaded by NiTransforms maps fsnative world
+    positions into T1w space. Despite the filename's ``from-T1w_to-fsnative``
+    direction, this is a pull transform; its matrix is used without
+    inversion. Exactly one matching transform is required for the fallback.
+
+    Inputs are expected to be fMRIPrep outputs and, for the fallback, the
+    corresponding FreeSurfer reconstruction. Matching array shapes do not
+    verify topology, vertex correspondence, or provenance. Coordinate
+    finiteness is not checked. Missing ``cras`` metadata raises KeyError;
+    other file-reading and transform-parsing errors propagate from NiBabel
+    and NiTransforms. No files are modified.
+
+    Examples
+    --------
+    Load the left hemisphere and form five equally spaced cortical depths,
+    including the white and pial boundaries (the dataset must exist)::
+
+        white, pial = load_surfaces(
+            '/data/fmriprep', '01', 'l',
+            fs_dir='/data/freesurfer/sub-01',
+        )
+        depths = np.linspace(0, 1, 5)[:, None, None]
+        coords = (1 - depths) * white[None] + depths * pial[None]
+    """
+    if lr not in ('l', 'r'):
+        raise ValueError(f"lr must be 'l' or 'r', got {lr!r}")
+    sub_dir = os.path.join(fmriprep_dir, f'sub-{sid}')
+    anat_dirs = [os.path.join(sub_dir, 'anat')] + sorted(glob(os.path.join(sub_dir, 'ses-*', 'anat')))
+
+    def find(name):
+        fns = [fn for d in anat_dirs for fn in sorted(glob(os.path.join(d, f'sub-{sid}_*{name}')))]
+        if len(fns) > 1:
+            raise ValueError(f'Several files match *{name} for sub-{sid}: {fns}')
+        return fns[0] if fns else None
+
+    kinds = ('white', 'pial')
+    groups = {}  # one per directory and filename prefix, so that the pair shares a T1w frame
+    for d in anat_dirs:
+        for kind in kinds:
+            suffix = f'_{kind}.surf.gii'
+            for fn in sorted(glob(os.path.join(d, f'sub-{sid}_*hemi-{lr.upper()}{suffix}'))):
+                groups.setdefault(fn[:-len(suffix)], {})[kind] = fn
+    incomplete = [list(group.values()) for group in groups.values() if len(group) < len(kinds)]
+    if incomplete:
+        raise ValueError(f'White or pial surface without its counterpart for sub-{sid}: {incomplete}')
+    if len(groups) > 1:
+        raise ValueError(f'Several pairs of white and pial surfaces for sub-{sid}: {sorted(groups)}')
+    if groups:
+        [group] = groups.values()
+        surfaces = [nib.load(group[kind]).agg_data('pointset').astype(np.float64) for kind in kinds]
+    elif fs_dir is None:
+        raise FileNotFoundError(
+            f'No hemi-{lr.upper()} white and pial surfaces for sub-{sid} in {anat_dirs}; '
+            'run fMRIPrep with --level full, or pass fs_dir to use the FreeSurfer surfaces.')
+    else:
+        xfm_fn = find('from-T1w_to-fsnative_mode-image_xfm.txt')
+        if xfm_fn is None:
+            raise FileNotFoundError(f'No T1w-to-fsnative transform for sub-{sid} in {anat_dirs}')
+        to_t1w = nt.linear.Affine.from_filename(xfm_fn).matrix
+        surfaces = []
+        for kind in kinds:
+            coords, _, info = nib.freesurfer.read_geometry(
+                os.path.join(fs_dir, 'surf', f'{lr}h.{kind}'), read_metadata=True)
+            coords = coords.astype(np.float64) + info['cras']
+            surfaces.append(coords @ to_t1w[:3, :3].T + to_t1w[:3, 3])
+    white, pial = surfaces
+    if white.shape != pial.shape:
+        raise ValueError(
+            f'White and pial surfaces of sub-{sid} differ in shape: {white.shape}, {pial.shape}')
+    return white, pial
