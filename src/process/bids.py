@@ -6,11 +6,13 @@ These helpers read a BIDS dataset with the standard library only (no PyBIDS):
   extension.
 * :func:`get_bids_metadata` merges the JSON sidecars that apply to a file,
   following the BIDS inheritance principle.
+* :func:`list_bold_runs` lists a subject's raw BOLD files.
 """
 
 import os
 import json
 import warnings
+from glob import glob
 
 # Entities defined by the BIDS specification (schema version 1.11.2).
 BIDS_ENTITIES = {
@@ -165,3 +167,53 @@ def get_bids_metadata(fn, bids_root):
             with open(json_fn, encoding='utf-8') as f:
                 metadata.update(json.load(f))
     return {k: v for k, v in metadata.items() if v is not None}
+
+
+def list_bold_runs(bids_dir, sid, filter_=None):
+    """List a subject's raw BOLD files, optionally selecting a subset.
+
+    Parameters
+    ----------
+    bids_dir : str or os.PathLike
+        Raw BIDS dataset root, containing ``sub-<sid>``. Relative paths are
+        resolved against the current working directory.
+    sid : str
+        Subject ID, without ``sub-``.
+    filter_ : callable or None, optional
+        Called once with the sorted list of path strings. Must return a
+        list containing the paths to keep; it may also reorder them. This
+        is a list-to-list function, not a predicate called for each file.
+
+    Returns
+    -------
+    bold_fns : list of str
+        Paths matching ``sub-<sid>/func/*_bold.nii[.gz]`` or
+        ``sub-<sid>/ses-*/func/*_bold.nii[.gz]``, sorted lexicographically
+        before filtering. Paths retain the supplied root's relative or
+        absolute form. An empty list is allowed, including when the dataset
+        or subject directory does not exist.
+
+    Notes
+    -----
+    Only filenames are inspected. Images and metadata are not opened, and
+    BIDS validity is not checked. Files with ``echo`` or ``chunk`` entities
+    are listed too; :func:`process.fmriprep.find_runs` rejects them if they are selected.
+
+    Examples
+    --------
+    Select resting-state runs (the dataset must exist)::
+
+        bold_fns = list_bold_runs(
+            '/data/bids', '01',
+            filter_=lambda fns: [fn for fn in fns
+                                 if '_task-rest_' in os.path.basename(fn)],
+        )
+    """
+    bold_fns = []
+    for pattern in ['func', os.path.join('ses-*', 'func')]:
+        for ext in ['.nii', '.nii.gz']:
+            bold_fns += glob(os.path.join(bids_dir, f'sub-{sid}', pattern, f'*_bold{ext}'))
+    bold_fns = sorted(bold_fns)
+    if filter_ is not None:
+        bold_fns = filter_(bold_fns)
+    return bold_fns

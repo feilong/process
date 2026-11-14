@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from process.resample import find_runs, list_bold_runs
+from process.fmriprep import find_runs
 
 SID = '01'
 
@@ -147,18 +147,6 @@ def test_find_runs_several_fieldmap_transforms(dirs):
     with pytest.raises(ValueError, match='Several boldref-to-fieldmap transforms'):
         find_runs(fp, bids, SID)
 
-
-
-def test_list_bold_runs(dirs):
-    fp, bids = dirs
-    a = _add_run(fp, bids, f'sub-{SID}_ses-2_task-x', ses='2')
-    b = _add_run(fp, bids, f'sub-{SID}_ses-1_task-y', ses='1', ext='.nii')
-    c = _add_run(fp, bids, f'sub-{SID}_task-z')
-    _touch(os.path.join(bids, f'sub-{SID}', 'func', f'sub-{SID}_task-z_sbref.nii.gz'))
-    _touch(os.path.join(bids, f'sub-{SID}', 'anat', f'sub-{SID}_T1w.nii.gz'))
-    _touch(os.path.join(bids, 'sub-011', 'func', 'sub-011_task-x_bold.nii.gz'))  # other subject
-    assert list_bold_runs(bids, SID) == sorted([a, b, c])
-    assert list_bold_runs(bids, SID, filter_=lambda fns: [_ for _ in fns if 'ses-' in _]) == sorted([a, b])
 
 
 def test_find_runs_filter(dirs):

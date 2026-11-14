@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from process.bids import parse_bids_filename, get_bids_metadata
+from process.bids import parse_bids_filename, get_bids_metadata, list_bold_runs
 
 
 def test_parse_bids_filename():
@@ -92,3 +92,26 @@ def test_get_bids_metadata_zero_padded_index(tmp_path):
     bold.touch()
     assert get_bids_metadata(str(bold), str(root)) == {
         'PhaseEncodingDirection': 'j-', 'TotalReadoutTime': 0.05}
+
+
+def test_list_bold_runs(tmp_path):
+    bids = tmp_path / 'bids'
+    sub = bids / 'sub-01'
+    paths = {
+        'a': sub / 'ses-2' / 'func' / 'sub-01_ses-2_task-x_bold.nii.gz',
+        'b': sub / 'ses-1' / 'func' / 'sub-01_ses-1_task-y_bold.nii',
+        'c': sub / 'func' / 'sub-01_task-z_bold.nii.gz',
+        # not listed:
+        'json': sub / 'func' / 'sub-01_task-z_bold.json',
+        'events': sub / 'func' / 'sub-01_task-z_events.tsv',
+        'sbref': sub / 'func' / 'sub-01_task-z_sbref.nii.gz',
+        'anat': sub / 'anat' / 'sub-01_T1w.nii.gz',
+        'other subject': bids / 'sub-011' / 'func' / 'sub-011_task-x_bold.nii.gz',
+    }
+    for path in paths.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    a, b, c = (str(paths[_]) for _ in 'abc')
+    assert list_bold_runs(str(bids), '01') == sorted([a, b, c])
+    assert list_bold_runs(str(bids), '01', filter_=lambda fns: [_ for _ in fns if 'ses-' in _]) == sorted([a, b])
+    assert list_bold_runs(str(tmp_path / 'missing'), '01') == []
