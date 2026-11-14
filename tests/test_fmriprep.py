@@ -70,8 +70,12 @@ def test_find_runs_fieldmap(dirs, version):
         'fieldmap': {
             'xfm_fn': f'{base}_from-boldref_to-auto00000_mode-image{desc}_xfm.txt',
             'coeff_fns': coeff_fns,
+            'ref_fn': os.path.join(
+                fp, f'sub-{SID}', 'fmap', f'sub-{SID}_fmapid-auto00000_desc-preproc_fieldmap.nii.gz'),
         },
     }
+    os.remove(run['fieldmap']['ref_fn'])
+    assert find_runs(fp, bids, SID)[0]['fieldmap']['ref_fn'] is None
 
 
 def test_find_runs_sessions(dirs):
@@ -319,7 +323,8 @@ def test_find_runs_part_mag(dirs, fmapid):
         assert run['fieldmap'] == {
             'xfm_fn': os.path.join(
                 func, f'sub-{SID}_task-x_run-1_from-boldref_to-auto00000_mode-image_desc-fmap_xfm.txt'),
-            'coeff_fns': coeff}
+            'coeff_fns': coeff,
+            'ref_fn': coeff[0].replace('_desc-coeff_', '_desc-preproc_')}
     else:
         assert run['fieldmap'] is None
 

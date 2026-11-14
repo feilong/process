@@ -229,3 +229,76 @@ def fieldmap_shift(fieldmap, ijk):
         shift += map_coordinates(
             coef, grid, order=3, prefilter=False, mode='grid-constant', cval=0.0)
     return shift.reshape(ijk.shape[1:])
+
+
+def outside_fieldmap(ref_fn, xfm_fn, bold_affine, ijk):
+    """Find lookup coordinates outside the fieldmap's field of view.
+
+    Test positions against the outer voxel faces of an image on the
+    fieldmap grid. This is a geometric bounds check, not a brain mask or
+    a test of field-estimation quality. Outside the grid,
+    :func:`fieldmap_shift` still evaluates the B-spline extension.
+
+    Parameters
+    ----------
+    ref_fn : str or os.PathLike
+        An image on the fieldmap's grid, such as fMRIPrep's
+        ``*_desc-preproc_fieldmap.nii.gz``, returned as ``'ref_fn'`` by
+        :func:`process.fmriprep.find_runs`. Must have at least three spatial
+        axes. Only its header is read; image intensities and any axes after
+        the first three are not used. A coefficient image has a different
+        grid and should not be used as this reference.
+    xfm_fn : str or os.PathLike
+        The ``*_from-boldref_to-<fmapid>_mode-image*_xfm.txt`` file of the
+        run, as for :func:`load_fieldmap`. Its inverse maps boldref world
+        coordinates to fieldmap world coordinates.
+    bold_affine : array_like of shape (4, 4)
+        Voxel-to-RAS+ world affine of the raw BOLD image. This defines the
+        lattice on which the boldref-frame lookup coordinates are expressed,
+        as for :func:`load_fieldmap`.
+    ijk : array_like of shape (3, ...)
+        Boldref-frame lookup positions on the raw BOLD voxel lattice,
+        before head motion, as for :func:`fieldmap_shift`. Converted to
+        float64; values must be finite, but finiteness is not checked.
+        A single point of shape ``(3,)`` and empty point arrays are allowed.
+
+    Returns
+    -------
+    outside : ndarray of bool, shape ``np.shape(ijk)[1:]``
+        True where a position is outside the reference grid. As in
+        :func:`process.resample.sample_bold`, an axis of length ``n`` covers
+        the inclusive interval ``[-0.5, n - 0.5]``. A position is outside if
+        it exceeds these bounds on any spatial axis; the boundary itself
+        is inside. A single point returns a zero-dimensional Boolean array.
+
+    Raises
+    ------
+    ValueError
+        If ``ijk`` does not have a leading axis of length 3.
+    numpy.linalg.LinAlgError
+        If the reference affine or registration matrix is singular.
+
+    Notes
+    -----
+    Coordinates are mapped to the reference grid with
+    ``inv(ref.affine) @ inv(xfm) @ bold_affine``, where ``xfm`` is the RAS+
+    matrix loaded by NiTransforms. No motion or distortion shift is applied.
+    Image-header and transform-reading errors propagate. Inputs are not
+    modified; the function returns a mask and does not issue warnings.
+
+    See Also
+    --------
+    fieldmap_shift : Evaluate the field, including outside the reference grid.
+    process.resample.resample_run : Sample a run and warn about outside positions.
+    """
+    ijk = np.asarray(ijk, dtype=np.float64)
+    if ijk.ndim < 1 or ijk.shape[0] != 3:
+        raise ValueError(f'ijk must have shape (3, ...), got {ijk.shape}')
+    ref = nib.load(ref_fn)
+    bold_to_ref = (np.linalg.inv(ref.affine)
+                   @ np.linalg.inv(nt.linear.Affine.from_filename(xfm_fn).matrix) @ bold_affine)
+    points = ijk.reshape(3, -1)
+    coords = bold_to_ref[:3, :3] @ points + bold_to_ref[:3, 3:]
+    last = np.array(ref.shape[:3], dtype=np.float64)[:, np.newaxis] - 1
+    outside = np.any((coords < -0.5) | (coords > last + 0.5), axis=0)
+    return outside.reshape(ijk.shape[1:])

@@ -5,9 +5,11 @@ import nibabel as nib
 from scipy.ndimage import map_coordinates
 import warnings
 import h5py
+import nitransforms as nt
 from nitransforms.io.itk import ITKCompositeH5
 
-from .fieldmap import fieldmap_shift
+from .fieldmap import fieldmap_shift, load_fieldmap, outside_fieldmap
+from .metadata import distortion_parameters
 
 
 def sample_bold(data, hmc, ijk, fieldmap=None, order=1):
@@ -159,6 +161,145 @@ def sample_bold(data, hmc, ijk, fieldmap=None, order=1):
         values[t] = sampled.reshape(n_samples, n_locations).mean(axis=0)
     coverage = (n_inside / n_volumes).reshape(n_samples, n_locations).mean(axis=0)
     return values, coverage
+
+
+def resample_run(run, bids_dir, coords, *, order=1, max_outside_fieldmap=0.05):
+    """Sample one raw BOLD run at positions given in T1w space.
+
+    Load the run's fMRIPrep transforms and fieldmap, convert the positions
+    to raw BOLD voxel coordinates, and sample with :func:`sample_bold`, so
+    that motion correction, distortion correction, and coregistration are
+    applied in a single interpolation.
+
+    Parameters
+    ----------
+    run : dict
+        One element of the list returned by
+        :func:`process.fmriprep.find_runs`, with keys ``'label'``,
+        ``'bold_fn'``, ``'hmc_fn'``, ``'coreg_fn'``, and ``'fieldmap'``.
+        The raw image must be 4D with at least one volume, and the motion
+        file must contain one transform per volume. ``'fieldmap'`` is None
+        or a dict with ``'coeff_fns'``, ``'xfm_fn'``, and ``'ref_fn'``;
+        ``'ref_fn'`` may be None. Paths may be strings or path-like objects.
+    bids_dir : str or os.PathLike
+        Root of the raw BIDS dataset, used to read the phase-encoding
+        direction and readout time through BIDS metadata inheritance. Only
+        read when the run has a fieldmap. Relative paths, including those
+        in ``run``, are resolved against the current working directory.
+    coords : array_like of shape (D, N, 3)
+        World (RAS+, mm) coordinates in fMRIPrep's T1w space: ``D`` samples
+        (for example, cortical depths) for each of ``N`` locations. These
+        are not T1w voxel indices or FreeSurfer surface RAS coordinates.
+        Values are converted to float64 and must be finite; finiteness is
+        not checked. ``D`` must be positive; ``N = 0`` is allowed.
+    order : int, optional
+        Spatial spline interpolation order for BOLD intensities, from 0
+        to 5. Default is 1 (linear); 0 is nearest-neighbor and 3 is cubic.
+        See :func:`sample_bold` for accepted integer types and boundary
+        handling. This does not change the fieldmap's cubic B-splines.
+    max_outside_fieldmap : float, optional
+        Fraction in [0, 1] above which to emit a UserWarning about positions
+        outside the fieldmap grid. Default is 0.05; 0 warns for any outside
+        position, and 1 suppresses the warning. The comparison is strictly
+        greater than the threshold, which is not validated. The fraction
+        counts the ``D * N`` positions before head motion, once per run,
+        rather than once per volume. This setting only controls the warning.
+
+    Returns
+    -------
+    values : ndarray of float64, shape (T, N)
+        Sampled intensities for each volume, averaged equally over the
+        ``D`` samples per location. Boundary-clipped samples contribute
+        too. ``T`` is the number of raw BOLD volumes.
+    coverage : ndarray of float64, shape (N,)
+        Fraction of the ``D * T`` sampling positions inside the raw BOLD
+        field of view after motion and distortion correction, before
+        clipping. This does not measure fieldmap coverage or signal quality.
+        Both outputs are empty along the location axis when ``N = 0``.
+
+    Raises
+    ------
+    ValueError
+        If ``coords`` does not have shape ``(D, N, 3)`` with positive ``D``,
+        or if the image dimensions, motion-array shape, interpolation order,
+        or required distortion metadata are invalid.
+    numpy.linalg.LinAlgError
+        If an affine that must be inverted is singular.
+
+    Warns
+    -----
+    UserWarning
+        If the fraction of positions outside the fieldmap grid exceeds
+        ``max_outside_fieldmap``. No check is made without a fieldmap,
+        without its ``ref_fn``, or when there are no locations.
+
+    See Also
+    --------
+    process.fmriprep.find_runs : Discover the run's input paths.
+    sample_bold : Sampling, depth averaging, and BOLD coverage conventions.
+    process.fieldmap.outside_fieldmap : Check fieldmap grid bounds.
+
+    Notes
+    -----
+    With ``A`` the affine of the raw BOLD image, ``C`` the matrix of
+    ``from-boldref_to-T1w`` (which maps T1w positions to boldref positions),
+    and ``M[t]`` the motion matrices (boldref to volume ``t``), positions
+    are ``inv(A) @ C @ p`` for a homogeneous column vector ``p`` from
+    ``coords``, and motion is ``inv(A) @ M[t] @ A``. The resulting lookup
+    positions are in the boldref frame expressed on the raw BOLD voxel
+    lattice. Fieldmap shifts are evaluated there before motion and added
+    after motion along the raw phase-encoding axis, as in :func:`sample_bold`.
+
+    If ``run['fieldmap']`` is None, no distortion correction is applied.
+
+    Positions outside the fieldmap's field of view (the grid of
+    ``run['fieldmap']['ref_fn']``) are still corrected, using the B-spline
+    extension of the field. The grid check neither masks samples nor
+    changes their shifts; it does not establish that the field estimate is
+    reliable inside the grid. No Jacobian intensity modulation is applied.
+
+    The whole run is loaded into memory with NIfTI intensity scaling
+    applied. This can promote the stored data type to a floating-point
+    type. Each volume is then sampled in float64. Inputs are not modified.
+    File-reading, transform-parsing, and metadata errors propagate from
+    the loaders; files are still loaded when ``N = 0``.
+
+    Examples
+    --------
+    Sample one discovered run at prepared T1w-space positions::
+
+        from process.fmriprep import find_runs
+
+        run = find_runs('/data/fmriprep', '/data/bids', '01')[0]
+        values, coverage = resample_run(run, '/data/bids', coords, order=1)
+    """
+    coords = np.asarray(coords, dtype=np.float64)
+    if coords.ndim != 3 or coords.shape[2] != 3:
+        raise ValueError(f'coords must have shape (D, N, 3), got {coords.shape}')
+    img = nib.load(run['bold_fn'])
+    affine = img.affine
+    inv_affine = np.linalg.inv(affine)
+
+    hmc = nt.linear.LinearTransformsMapping.from_filename(run['hmc_fn'], fmt='itk').matrix
+    hmc = inv_affine @ hmc @ affine
+    t1w_to_vox = inv_affine @ nt.linear.Affine.from_filename(run['coreg_fn']).matrix
+    ijk = np.moveaxis(coords @ t1w_to_vox[:3, :3].T + t1w_to_vox[:3, 3], -1, 0)
+
+    fieldmap = None
+    if run['fieldmap'] is not None:
+        pe_direction, readout_time = distortion_parameters(run['bold_fn'], bids_dir)
+        fieldmap = load_fieldmap(
+            run['fieldmap']['coeff_fns'], run['fieldmap']['xfm_fn'],
+            affine, pe_direction, readout_time)
+        if run['fieldmap']['ref_fn'] is not None and ijk.size:
+            outside = outside_fieldmap(
+                run['fieldmap']['ref_fn'], run['fieldmap']['xfm_fn'], affine, ijk).mean()
+            if outside > max_outside_fieldmap:
+                warnings.warn(
+                    f"{run['label']}: {outside:.1%} of the sample positions are outside the "
+                    "fieldmap's field of view; their distortion correction is extrapolated.")
+
+    return sample_bold(np.asanyarray(img.dataobj), hmc, ijk, fieldmap, order=order)
 
 
 def interpolate(img, ijk, fill=np.nan, kwargs={'order': 1}):

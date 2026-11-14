@@ -178,8 +178,11 @@ def find_runs(
         - ``'hmc_fn'``, ``'coreg_fn'``: the head-motion and boldref-to-T1w
           transforms;
         - ``'fieldmap'``: None (no distortion correction), or a dict with
-          ``'xfm_fn'`` (boldref-to-fieldmap transform) and ``'coeff_fns'``
-          (a sorted list of B-spline coefficient paths from one group).
+          ``'xfm_fn'`` (boldref-to-fieldmap transform), ``'coeff_fns'``
+          (a sorted list of B-spline coefficient paths from one group),
+          and ``'ref_fn'`` (the group's ``desc-preproc_fieldmap`` image,
+          used to check fieldmap grid bounds; None if missing). A None
+          ``'ref_fn'`` skips that check but does not disable SDC.
 
     Raises
     ------
@@ -199,6 +202,7 @@ def find_runs(
     See Also
     --------
     list_bold_runs : List raw files without checking derivative inputs.
+    process.resample.resample_run : Load a run and sample T1w-space positions.
     process.fieldmap.load_fieldmap : Load coefficients as voxel shifts.
     process.resample.sample_bold : Sample image data using loaded transforms and shifts.
 
@@ -305,7 +309,9 @@ def find_runs(
             fmapid = fmapid.split('_mode-image')[0]
             coeff_fns = _coefficient_files(fmriprep_dir, fmap_dirs, sid, fmapid, xfm_fns[0], label,
                                            fieldmap_prefix.get(label))
-            run['fieldmap'] = {'xfm_fn': xfm_fns[0], 'coeff_fns': coeff_fns}
+            ref_fn = coeff_fns[0].rsplit('_desc-coeff', 1)[0] + '_desc-preproc_fieldmap.nii.gz'
+            run['fieldmap'] = {'xfm_fn': xfm_fns[0], 'coeff_fns': coeff_fns,
+                               'ref_fn': ref_fn if os.path.exists(ref_fn) else None}
         elif label in fieldmap_prefix:
             raise ValueError(f'{label} is in fieldmap_prefix, but has no boldref-to-fieldmap transform')
         elif has_fieldmaps and label not in no_fieldmap:

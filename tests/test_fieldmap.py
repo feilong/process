@@ -3,7 +3,7 @@ import nitransforms as nt
 import numpy as np
 import pytest
 
-from process.fieldmap import load_fieldmap, fieldmap_shift
+from process.fieldmap import load_fieldmap, fieldmap_shift, outside_fieldmap
 
 PE_DIRECTIONS = ['i', 'i-', 'j', 'j-', 'k', 'k-']
 
@@ -293,3 +293,32 @@ def test_fieldmap_shift_sign_matches_fmriprep(tmp_path, axcodes, pe_direction):
 
     np.testing.assert_allclose(ours, theirs)
     assert abs(shift) == pytest.approx(0.5)
+
+
+def test_outside_fieldmap(tmp_path, fmap_files):
+    """Positions are tested against the outer faces of the reference grid's edge voxels."""
+    _, xfm_fn = fmap_files
+    xfm = nt.linear.Affine.from_filename(xfm_fn).matrix  # as stored in the file
+    ref_affine = np.diag([2.0, 2.5, 3.0, 1.0])
+    ref_affine[:3, 3] = [-10.0, 5.0, 7.0]
+    ref_shape = (6, 7, 8)
+    ref_fn = tmp_path / 'sub-01_fmapid-auto00000_desc-preproc_fieldmap.nii.gz'
+    nib.save(nib.Nifti1Image(np.zeros(ref_shape + (1,), dtype=np.float32), ref_affine), ref_fn)
+
+    rng = np.random.default_rng(0)
+    ref_ijk = rng.uniform(-2, 10, (3, 4, 100))
+    ref_ijk[:, 0, :6] = [[-0.49, -0.51, 2, 2, 2, 2], [3, 3, 6.49, 6.51, 3, 3], [4, 4, 4, 4, 7.49, 7.51]]
+    last = np.array(ref_shape)[:, None, None] - 1
+    expected = np.any((ref_ijk < -0.5) | (ref_ijk > last + 0.5), axis=0)
+    assert list(expected[0, :6]) == [False, True, False, True, False, True]
+    assert 0.2 < expected.mean() < 0.9
+
+    to_bold = np.linalg.inv(BOLD_AFFINE) @ xfm @ ref_affine
+    ijk = np.einsum('ab,bdn->adn', to_bold[:3, :3], ref_ijk) + to_bold[:3, 3, None, None]
+    outside = outside_fieldmap(ref_fn, xfm_fn, BOLD_AFFINE, ijk)
+    assert outside.shape == (4, 100) and outside.dtype == bool
+    np.testing.assert_array_equal(outside, expected)
+    assert outside_fieldmap(ref_fn, xfm_fn, BOLD_AFFINE, ijk[:, 0, 1]) == True
+
+    with pytest.raises(ValueError, match='ijk'):
+        outside_fieldmap(ref_fn, xfm_fn, BOLD_AFFINE, np.zeros((2, 5)))

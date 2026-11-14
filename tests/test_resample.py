@@ -323,3 +323,132 @@ def test_sample_bold_no_locations():
     for f in [None, fmap]:
         values, coverage = sample_bold(data, hmc, np.zeros((3, 5, 0)), f)
         assert values.shape == (SHAPE[3], 0) and coverage.shape == (0,)
+
+
+# resample_run
+
+import json
+
+import nitransforms as nt
+
+from process.fieldmap import load_fieldmap
+from process.resample import resample_run
+
+# LAS, 3 x 3 x 3.5 mm, slightly oblique
+RUN_AFFINE = np.array([
+    [-3.0, 0.1, 0.0, 20.0],
+    [0.0, 3.0, 0.2, -25.0],
+    [0.0, -0.1, 3.5, -15.0],
+    [0.0, 0.0, 0.0, 1.0]])
+
+
+def _itk_matrix(fn):
+    """The matrices as stored in an ITK text file (which has limited precision)."""
+    return nt.linear.LinearTransformsMapping.from_filename(fn, fmt='itk').matrix
+
+
+@pytest.fixture
+def run_files(tmp_path):
+    """A raw BOLD run with linear intensities, and fMRIPrep-like transforms and fieldmap."""
+    rng = np.random.default_rng(0)
+    data, c, b = _linear_data(rng)
+    func = tmp_path / 'bids' / 'sub-01' / 'func'
+    func.mkdir(parents=True)
+    bold_fn = func / 'sub-01_task-x_bold.nii.gz'
+    nib.save(nib.Nifti1Image(data, RUN_AFFINE), bold_fn)
+    (func / 'sub-01_task-x_bold.json').write_text(json.dumps(
+        {'PhaseEncodingDirection': 'j-', 'TotalReadoutTime': 0.05}))
+
+    hmc_world = RUN_AFFINE @ _rigid_vox(rng, SHAPE[3]) @ np.linalg.inv(RUN_AFFINE)
+    hmc_fn = tmp_path / 'sub-01_task-x_from-boldref_to-orig_mode-image_desc-hmc_xfm.txt'
+    nt.linear.LinearTransformsMapping(hmc_world).to_filename(hmc_fn, fmt='itk')
+    coreg = _rigid_vox(rng, 1, scale=3.0)[0]
+    coreg_fn = tmp_path / 'sub-01_task-x_from-boldref_to-T1w_mode-image_desc-coreg_xfm.txt'
+    nt.linear.Affine(coreg).to_filename(coreg_fn, fmt='itk')
+
+    center = RUN_AFFINE @ np.append((np.array(SHAPE[:3]) - 1) / 2, 1)
+    coef_affine = np.diag([20.0, 20.0, 20.0, 1.0])
+    coef_affine[:3, 3] = center[:3] - 50.0  # a 6 x 6 x 6 grid centered on the data
+    coeff_fn = tmp_path / 'sub-01_fmapid-auto00000_desc-coeff_fieldmap.nii.gz'
+    nib.save(nib.Nifti1Image(rng.normal(0, 10, (6, 6, 6)), coef_affine), coeff_fn)
+    xfm_fn = tmp_path / 'sub-01_task-x_from-boldref_to-auto00000_mode-image_xfm.txt'
+    nt.linear.Affine(_rigid_vox(rng, 1)[0]).to_filename(xfm_fn, fmt='itk')
+
+    # The fieldmap's grid: the BOLD grid with 2 more voxels on every side
+    ref_affine = RUN_AFFINE.copy()
+    ref_affine[:3, 3] = (RUN_AFFINE @ [-2, -2, -2, 1])[:3]
+    ref_fn = tmp_path / 'sub-01_fmapid-auto00000_desc-preproc_fieldmap.nii.gz'
+    ref_shape = tuple(np.array(SHAPE[:3]) + 4)
+    nib.save(nib.Nifti1Image(np.zeros(ref_shape, dtype=np.float32), ref_affine), ref_fn)
+
+    run = {
+        'label': 'task-x', 'bold_fn': str(bold_fn), 'hmc_fn': str(hmc_fn),
+        'coreg_fn': str(coreg_fn),
+        'fieldmap': {'xfm_fn': str(xfm_fn), 'coeff_fns': [str(coeff_fn)], 'ref_fn': str(ref_fn)}}
+    return run, str(tmp_path / 'bids'), c, b
+
+
+def _t1w_coords(run, ijk):
+    """Boldref voxel positions (3, D, N) -> T1w world coordinates (D, N, 3)."""
+    to_t1w = np.linalg.inv(_itk_matrix(run['coreg_fn'])[0]) @ RUN_AFFINE
+    return np.moveaxis(_apply(to_t1w[None], ijk)[0], 0, -1)
+
+
+@pytest.mark.filterwarnings('error')
+@pytest.mark.parametrize('sdc', [True, False])
+def test_resample_run(run_files, sdc):
+    run, bids_dir, c, b = run_files
+    rng = np.random.default_rng(1)
+    ijk = _interior(rng, 3, 50, margin=3.0)
+    hmc = np.linalg.inv(RUN_AFFINE) @ _itk_matrix(run['hmc_fn']) @ RUN_AFFINE
+    moved = _apply(hmc, ijk)
+    if sdc:
+        fieldmap = load_fieldmap(
+            run['fieldmap']['coeff_fns'], run['fieldmap']['xfm_fn'], RUN_AFFINE, 'j-', 0.05)
+        shift = fieldmap_shift(fieldmap, ijk)
+        assert np.abs(shift).max() > 0.2
+        moved[:, 1] += shift
+    else:
+        run = dict(run, fieldmap=None)
+        bids_dir = 'not-read-without-a-fieldmap'
+
+    values, coverage = resample_run(run, bids_dir, _t1w_coords(run, ijk))
+    assert values.shape == (SHAPE[3], 50) and values.dtype == np.float64
+    np.testing.assert_allclose(values, _expected(c, b, moved), atol=1e-8)
+    np.testing.assert_array_equal(coverage, 1.0)
+
+
+def test_resample_run_order(run_files):
+    run, bids_dir, c, b = run_files
+    coords = _t1w_coords(run, _interior(np.random.default_rng(2), 2, 10, margin=3.0))
+    linear, _ = resample_run(run, bids_dir, coords)
+    nearest, _ = resample_run(run, bids_dir, coords, order=0)
+    assert not np.allclose(linear, nearest)
+
+
+@pytest.mark.parametrize('shape', [(5, 3), (3, 2, 5), (2, 5, 4), (3,)])
+def test_resample_run_bad_coords(run_files, shape):
+    run, bids_dir, c, b = run_files
+    with pytest.raises(ValueError, match='coords'):
+        resample_run(run, bids_dir, np.zeros(shape))
+
+
+def test_resample_run_outside_fieldmap(run_files, tmp_path):
+    """Warn when many positions are in slices that the fieldmap does not cover."""
+    run, bids_dir, c, b = run_files
+    ref = nib.load(run['fieldmap']['ref_fn'])
+    small_fn = str(tmp_path / 'small_desc-preproc_fieldmap.nii.gz')
+    nib.save(ref.slicer[:, :, :8], small_fn)  # covers BOLD slices up to k = 5.5, roughly
+    small = dict(run, fieldmap=dict(run['fieldmap'], ref_fn=small_fn))
+    coords = _t1w_coords(run, _interior(np.random.default_rng(3), 2, 200, margin=1.0))  # k in [1, 8]
+
+    expected, _ = resample_run(run, bids_dir, coords)
+    with pytest.warns(UserWarning, match=r"task-x: \d+\.\d% of the sample positions are outside"):
+        values, _ = resample_run(small, bids_dir, coords)
+    np.testing.assert_array_equal(values, expected)  # the correction itself is unchanged
+
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        resample_run(small, bids_dir, coords, max_outside_fieldmap=1.0)
+        resample_run(dict(run, fieldmap=dict(run['fieldmap'], ref_fn=None)), bids_dir, coords)
