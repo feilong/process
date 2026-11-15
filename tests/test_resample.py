@@ -362,7 +362,7 @@ def run_files(tmp_path):
         {'PhaseEncodingDirection': 'j-', 'TotalReadoutTime': 0.05}))
 
     hmc_world = RUN_AFFINE @ _rigid_vox(rng, SHAPE[3]) @ np.linalg.inv(RUN_AFFINE)
-    hmc_fn = tmp_path / 'sub-01_task-x_from-boldref_to-orig_mode-image_desc-hmc_xfm.txt'
+    hmc_fn = tmp_path / 'sub-01_task-x_from-orig_to-boldref_mode-image_desc-hmc_xfm.txt'
     nt.linear.LinearTransformsMapping(hmc_world).to_filename(hmc_fn, fmt='itk')
     coreg = _rigid_vox(rng, 1, scale=3.0)[0]
     coreg_fn = tmp_path / 'sub-01_task-x_from-boldref_to-T1w_mode-image_desc-coreg_xfm.txt'
@@ -576,3 +576,87 @@ def test_resample_surfaces_n_depths(surface_inputs):
     expected, _ = resample_run(run, bids_dir, ((white + pial) / 2)[None])
     data = np.load(f"{dirs['out_dir']}/native/l-cerebrum/1step_pial_overlap/sub-01_task-x.npy")
     np.testing.assert_allclose(data, expected, atol=1e-9)
+
+
+# check_sdc
+
+from process.resample import check_sdc
+
+
+def _truth(ijk):
+    """A smooth image in boldref voxel coordinates: three blobs on a ramp."""
+    out = 100.0 + 2.0 * ijk[0]
+    for center, width, height in [((4, 5, 4), 2.5, 400.0), ((8, 9, 6), 2.0, 300.0), ((6, 3, 3), 1.5, 500.0)]:
+        d2 = sum((ijk[i] - center[i]) ** 2 for i in range(3))
+        out = out + height * np.exp(-d2 / (2 * width ** 2))
+    return out
+
+
+@pytest.fixture
+def distorted_run(run_files):
+    """The run of `run_files`, with raw data that are a moved and distorted `_truth`."""
+    run, bids_dir, c, b = run_files
+    hmc = np.linalg.inv(RUN_AFFINE) @ _itk_matrix(run['hmc_fn']) @ RUN_AFFINE
+    fieldmap = load_fieldmap(
+        run['fieldmap']['coeff_fns'], run['fieldmap']['xfm_fn'], RUN_AFFINE, 'j-', 0.05)
+    q = np.indices(SHAPE[:3]).reshape(3, -1).astype(np.float64)
+    data = np.empty(SHAPE)
+    for t in range(SHAPE[3]):
+        # Solve q = hmc[t] p + shift(p) e_j for the boldref position p of each raw voxel
+        inv = np.linalg.inv(hmc[t])
+        p = inv[:3, :3] @ q + inv[:3, 3:]
+        for _ in range(30):
+            moved = q.copy()
+            moved[1] -= fieldmap_shift(fieldmap, p)
+            p = inv[:3, :3] @ moved + inv[:3, 3:]
+        data[..., t] = _truth(p).reshape(SHAPE[:3])
+    nib.save(nib.Nifti1Image(data, RUN_AFFINE), run['bold_fn'])
+    ref_fn = os.path.join(os.path.dirname(run['hmc_fn']), 'sub-01_task-x_desc-coreg_boldref.nii.gz')
+    truth = _truth(np.indices(SHAPE[:3]).astype(np.float64))
+    nib.save(nib.Nifti1Image(truth, RUN_AFFINE), ref_fn)
+    return run, bids_dir, ref_fn
+
+
+def test_check_sdc(distorted_run):
+    run, bids_dir, ref_fn = distorted_run
+    result = check_sdc(run, bids_dir)
+    assert set(result) == {'r_sdc', 'r_nosdc', 'shift_p1', 'shift_p99'}
+    assert all(isinstance(_, float) for _ in result.values())
+    assert result['r_sdc'] > 0.998  # limited by linear interpolation of the blobs
+    assert result['r_nosdc'] < result['r_sdc'] - 0.002
+    assert result['shift_p99'] - result['shift_p1'] > 0.2
+    # A subset of the volumes gives nearly the same answer
+    assert check_sdc(run, bids_dir, n_frames=2)['r_sdc'] == pytest.approx(result['r_sdc'], abs=1e-3)
+
+
+def test_check_sdc_wrong_sign(distorted_run):
+    """A phase-encoding direction with the wrong sign is worse than no correction."""
+    run, bids_dir, ref_fn = distorted_run
+    json_fn = run['bold_fn'].replace('.nii.gz', '.json')
+    with open(json_fn, 'w') as f:
+        json.dump({'PhaseEncodingDirection': 'j', 'TotalReadoutTime': 0.05}, f)
+    result = check_sdc(run, bids_dir)
+    assert result['r_sdc'] < result['r_nosdc']
+
+
+def test_check_sdc_errors(distorted_run):
+    run, bids_dir, ref_fn = distorted_run
+    with pytest.raises(ValueError, match='no fieldmap'):
+        check_sdc(dict(run, fieldmap=None), bids_dir)
+    os.remove(ref_fn)
+    with pytest.raises(FileNotFoundError, match='coreg_boldref'):
+        check_sdc(run, bids_dir)
+
+
+def test_check_sdc_part_entity(distorted_run):
+    """The reference keeps `part`, which the transforms drop."""
+    run, bids_dir, ref_fn = distorted_run
+    expected = check_sdc(run, bids_dir)
+    part_fn = run['bold_fn'].replace('_bold.nii.gz', '_part-mag_bold.nii.gz')
+    os.rename(run['bold_fn'], part_fn)
+    os.rename(run['bold_fn'].replace('.nii.gz', '.json'), part_fn.replace('.nii.gz', '.json'))
+    run = dict(run, bold_fn=part_fn, label='task-x_part-mag')
+    with pytest.raises(FileNotFoundError, match='part-mag_desc-coreg_boldref'):
+        check_sdc(run, bids_dir)
+    os.rename(ref_fn, ref_fn.replace('_desc-coreg', '_part-mag_desc-coreg'))
+    assert check_sdc(run, bids_dir) == expected

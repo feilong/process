@@ -307,6 +307,125 @@ def resample_run(run, bids_dir, coords, *, order=1, max_outside_fieldmap=0.05):
     return sample_bold(np.asanyarray(img.dataobj), hmc, ijk, fieldmap, order=order)
 
 
+def check_sdc(run, bids_dir, n_frames=40):
+    """Compare sampling with and without SDC against fMRIPrep's reference.
+
+    fMRIPrep's ``desc-coreg_boldref`` image is the run's reference with
+    fMRIPrep's own distortion correction applied. The raw data are sampled
+    at selected voxel centers on its grid with :func:`sample_bold`, using
+    the same volumes and head-motion transforms with and without the
+    fieldmap. Correlate each temporal mean with the reference intensities.
+    Higher correlation with the fieldmap is evidence of consistent
+    susceptibility distortion correction (SDC), not a pass/fail criterion.
+
+    Parameters
+    ----------
+    run : dict
+        One element returned by :func:`process.fmriprep.find_runs`, with
+        keys ``'label'``, ``'bold_fn'``, ``'hmc_fn'``, and ``'fieldmap'``.
+        ``'fieldmap'`` must be a dict containing ``'coeff_fns'`` and
+        ``'xfm_fn'``. The raw image must be 4D with at least one volume,
+        with one motion transform per volume. Paths may be strings or
+        path-like objects. Neither ``'coreg_fn'`` nor the fieldmap's
+        ``'ref_fn'`` is used: sampling takes place in boldref space.
+    bids_dir : str or os.PathLike
+        Root of the raw BIDS dataset, used to read the phase-encoding
+        direction and total readout time through BIDS metadata inheritance.
+        Relative paths, including those in ``run``, are resolved against
+        the current working directory.
+    n_frames : int, optional
+        Maximum number of volumes to average; expected to be a positive
+        integer. Default is 40. Indices are rounded from evenly spaced
+        positions between the first and last volume, using all volumes
+        for shorter runs. A value of 1 selects the first volume. Initial
+        non-steady-state volumes are not excluded. This limits sampling
+        work, but the entire raw image is loaded before selecting volumes.
+
+    Returns
+    -------
+    result : dict
+        Four Python floats. ``'r_sdc'`` and ``'r_nosdc'`` are Pearson
+        correlations between the reference and the temporal means with
+        and without SDC. Both use the same voxels, whose reference
+        intensities are strictly above the 40th percentile of its positive
+        intensities. ``'shift_p1'`` and ``'shift_p99'`` are the 1st and 99th
+        percentiles of signed fieldmap shifts at those positions, in raw
+        BOLD voxels along the phase-encoding axis. Shifts are evaluated
+        once, before head motion, rather than separately for each volume.
+
+    Raises
+    ------
+    ValueError
+        If the run has no fieldmap, or required distortion metadata or
+        sampling inputs are invalid.
+    FileNotFoundError
+        If the reference image is missing.
+
+    Notes
+    -----
+    The reference is ``<name>_desc-coreg_boldref.nii.gz`` in the directory
+    of the motion transform, where ``<name>`` is the raw BOLD file name
+    without ``_bold.nii[.gz]``. Unlike the transforms, fMRIPrep names this
+    image with the raw file's ``part`` entity retained. This lookup is for
+    the single-echo runs supported by :func:`process.fmriprep.find_runs`.
+
+    Sampling uses linear interpolation, without Jacobian intensity
+    modulation. Out-of-field-of-view samples are clipped to the BOLD image
+    boundary and retained in the mean; coverage returned by
+    :func:`sample_bold` is not used to exclude voxels. Fieldmap coverage is
+    not checked. The intensity threshold is not an anatomical brain mask.
+
+    ``r_sdc > r_nosdc`` is a heuristic expectation, not a guarantee: a
+    wrong sign, axis, or readout time usually lowers ``r_sdc``, but a field
+    close to zero gives nearly equal correlations, and fMRIPrep's reference
+    is itself an estimate. The caller decides what to do with the result.
+
+    Meaningful correlations require at least two selected voxels and
+    finite, nonconstant reference and mean intensities. These conditions
+    and ``n_frames`` are not explicitly validated. Degenerate inputs can
+    raise NumPy errors or produce NaN correlations; nonfinite data are not
+    filtered out. Image-reading and transform errors propagate. No files
+    are written.
+
+    See Also
+    --------
+    process.fmriprep.find_runs : Discover the run's input paths.
+    sample_bold : Sampling and boundary conventions.
+    """
+    if run['fieldmap'] is None:
+        raise ValueError(f"{run['label']} has no fieldmap, so there is no distortion correction to check")
+    name = os.path.basename(run['bold_fn']).rsplit('_bold.nii', 1)[0]
+    ref_fn = os.path.join(os.path.dirname(run['hmc_fn']), name + '_desc-coreg_boldref.nii.gz')
+    if not os.path.exists(ref_fn):
+        raise FileNotFoundError(f"Reference image {ref_fn} of {run['label']} does not exist")
+    ref = nib.load(ref_fn)
+    reference = np.asarray(ref.dataobj, dtype=np.float64).ravel()
+    mask = reference > np.percentile(reference[reference > 0], 40)
+
+    img = nib.load(run['bold_fn'])
+    affine = img.affine
+    inv_affine = np.linalg.inv(affine)
+    frames = np.unique(np.round(np.linspace(0, img.shape[3] - 1, min(n_frames, img.shape[3]))).astype(int))
+    data = np.asanyarray(img.dataobj)[..., frames]
+    hmc = nt.linear.LinearTransformsMapping.from_filename(run['hmc_fn'], fmt='itk').matrix
+    hmc = (inv_affine @ hmc @ affine)[frames]
+    # Voxel centers of the reference image (boldref space) on the raw BOLD voxel lattice
+    ref_to_vox = inv_affine @ ref.affine
+    grid = np.indices(ref.shape[:3]).reshape(3, -1)[:, mask].astype(np.float64)
+    ijk = (ref_to_vox[:3, :3] @ grid + ref_to_vox[:3, 3:])[:, np.newaxis]
+
+    pe_direction, readout_time = distortion_parameters(run['bold_fn'], bids_dir)
+    fieldmap = load_fieldmap(
+        run['fieldmap']['coeff_fns'], run['fieldmap']['xfm_fn'], affine, pe_direction, readout_time)
+    result = {}
+    for key, fmap in [('r_sdc', fieldmap), ('r_nosdc', None)]:
+        values, _ = sample_bold(data, hmc, ijk, fmap)
+        result[key] = float(np.corrcoef(values.mean(axis=0), reference[mask])[0, 1])
+    shift = fieldmap_shift(fieldmap, ijk)
+    result['shift_p1'], result['shift_p99'] = (float(_) for _ in np.percentile(shift, [1, 99]))
+    return result
+
+
 def _resample_surfaces_run(run, bids_dir, coords, n_left_vertices, todo):
     """Sample both hemispheres once and write the missing outputs for a run.
 
