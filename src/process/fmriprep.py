@@ -1,5 +1,6 @@
 import json
 import os
+import warnings
 from glob import glob
 
 import nibabel as nib
@@ -7,6 +8,90 @@ import nitransforms as nt
 import numpy as np
 
 from .bids import list_bold_runs
+
+
+def fmriprep_version(fmriprep_dir):
+    """Read the version of fMRIPrep that generated an output directory.
+
+    Parameters
+    ----------
+    fmriprep_dir : str
+        fMRIPrep's output directory (the one containing ``sub-<sid>`` and
+        ``dataset_description.json``).
+
+    Returns
+    -------
+    version : str or None
+        The ``Version`` of the ``fMRIPrep`` entry of ``GeneratedBy`` (or of
+        ``PipelineDescription``, which older versions wrote). None if the
+        file or the entry is missing.
+    """
+    fn = os.path.join(fmriprep_dir, 'dataset_description.json')
+    if not os.path.exists(fn):
+        return None
+    with open(fn, encoding='utf-8') as f:
+        description = json.load(f)
+    entries = list(description.get('GeneratedBy', []))
+    if 'PipelineDescription' in description:
+        entries.append(description['PipelineDescription'])
+    for entry in entries:
+        if entry.get('Name') == 'fMRIPrep' and entry.get('Version'):
+            return entry['Version']
+    return None
+
+
+def check_fmriprep_version(fmriprep_out, configured):
+    """Check the configured fMRIPrep version against the outputs.
+
+    The workflow derives its output, FreeSurfer, and working directory
+    paths from the major and minor numbers of the configured version, so
+    outputs of another series cannot be processed with them.
+
+    Parameters
+    ----------
+    fmriprep_out : str
+        The output directory given to fMRIPrep. The description file is
+        read from it, and from its ``fmriprep`` subdirectory, where
+        versions before 21 wrote it.
+    configured : str
+        The configured version, such as ``'25.2.7'``.
+
+    Returns
+    -------
+    version : str
+        The version found in the outputs, or ``configured`` if none is
+        found.
+
+    Raises
+    ------
+    ValueError
+        If the outputs' major or minor version differs from the configured
+        one, or the two locations give different versions.
+
+    Warns
+    -----
+    UserWarning
+        If no version is found, or only the patch version differs.
+    """
+    found = {fmriprep_version(d) for d in (fmriprep_out, os.path.join(fmriprep_out, 'fmriprep'))}
+    found.discard(None)
+    if not found:
+        warnings.warn(
+            f'Cannot read the fMRIPrep version from the outputs in {fmriprep_out}; '
+            f'assuming the configured version {configured}.')
+        return configured
+    if len(found) > 1:
+        raise ValueError(f'Several fMRIPrep versions in {fmriprep_out}: {sorted(found)}')
+    [version] = found
+    if version.split('.')[:2] != configured.split('.')[:2]:
+        raise ValueError(
+            f'The outputs in {fmriprep_out} are from fMRIPrep {version}, but the configured '
+            f'version is {configured}; paths are derived from the configured version.')
+    if version != configured:
+        warnings.warn(
+            f'fMRIPrep version of the outputs ({version}) differs from the configured '
+            f'version ({configured}).')
+    return version
 
 
 def fmriprep_cmd(config, *additional_options):

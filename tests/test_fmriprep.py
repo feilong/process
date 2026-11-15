@@ -484,3 +484,72 @@ def test_load_surfaces_no_pairing_across_sessions(dirs):
     _add_gifti_surfaces(fp)
     with pytest.raises(ValueError, match='without its counterpart'):
         load_surfaces(fp, SID, 'l')
+
+
+# fmriprep_version
+
+import json
+
+from process.fmriprep import fmriprep_version
+
+
+@pytest.mark.parametrize('description, expected', [
+    ({'GeneratedBy': [{'Name': 'fMRIPrep', 'Version': '25.2.7'}]}, '25.2.7'),
+    ({'GeneratedBy': [{'Name': 'other', 'Version': '1.0'}, {'Name': 'fMRIPrep', 'Version': '25.1.4'}]},
+     '25.1.4'),
+    ({'PipelineDescription': {'Name': 'fMRIPrep', 'Version': '20.2.7'}}, '20.2.7'),
+    ({'GeneratedBy': [{'Name': 'other', 'Version': '1.0'}]}, None),
+    ({'GeneratedBy': [{'Name': 'fMRIPrep'}]}, None),
+    ({'Name': 'fMRIPrep outputs'}, None),
+    (None, None),
+])
+def test_fmriprep_version(tmp_path, description, expected):
+    if description is not None:
+        (tmp_path / 'dataset_description.json').write_text(json.dumps(description))
+    assert fmriprep_version(str(tmp_path)) == expected
+
+
+# check_fmriprep_version
+
+from process.fmriprep import check_fmriprep_version
+
+
+def _describe(path, version):
+    path.mkdir(parents=True, exist_ok=True)
+    (path / 'dataset_description.json').write_text(
+        json.dumps({'GeneratedBy': [{'Name': 'fMRIPrep', 'Version': version}]}))
+
+
+@pytest.mark.filterwarnings('error')
+@pytest.mark.parametrize('nested', [False, True])
+def test_check_fmriprep_version(tmp_path, nested):
+    _describe(tmp_path / 'fmriprep' if nested else tmp_path, '25.2.7')
+    assert check_fmriprep_version(str(tmp_path), '25.2.7') == '25.2.7'
+
+
+def test_check_fmriprep_version_warnings(tmp_path):
+    with pytest.warns(UserWarning, match='Cannot read'):
+        assert check_fmriprep_version(str(tmp_path), '20.2.7') == '20.2.7'
+    _describe(tmp_path, '25.2.7')
+    with pytest.warns(UserWarning, match='differs'):
+        assert check_fmriprep_version(str(tmp_path), '25.2.6') == '25.2.7'
+
+
+@pytest.mark.parametrize('nested, actual, configured', [
+    (False, '25.2.7', '20.2.7'),  # 20.x paths would point into <out>/fmriprep
+    (False, '24.1.1', '25.2.7'),  # the working directory would be fmriprep_25_2_wf
+    (False, '25.1.4', '25.2.7'),
+    (True, '20.2.7', '25.2.7'),
+    (False, '25.2.7', 'next.1'),
+])
+def test_check_fmriprep_version_incompatible(tmp_path, nested, actual, configured):
+    _describe(tmp_path / 'fmriprep' if nested else tmp_path, actual)
+    with pytest.raises(ValueError, match='configured'):
+        check_fmriprep_version(str(tmp_path), configured)
+
+
+def test_check_fmriprep_version_conflict(tmp_path):
+    _describe(tmp_path, '25.2.7')
+    _describe(tmp_path / 'fmriprep', '20.2.7')
+    with pytest.raises(ValueError, match='Several'):
+        check_fmriprep_version(str(tmp_path), '25.2.7')

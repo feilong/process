@@ -6,9 +6,10 @@ import tarfile
 from datetime import datetime
 from joblib import Parallel, delayed
 
-from .fmriprep import fmriprep_cmd, fmriprep_success
+from .fmriprep import fmriprep_cmd, fmriprep_success, check_fmriprep_version
 from .compression import copy_files_to_lzma_tar
 from .resample_workflow import resample_workflow
+from .resample import resample_surfaces
 from .confound import confound_workflow
 from .events import events_workflow
 from .transform import xform_workflow
@@ -185,6 +186,23 @@ class PreprocessWorkflow(object):
         return True, ''
 
     def _run_resample(self, filter_, **kwargs):
+        # One-step resampling from fMRIPrep's outputs (25.x), or the workflow
+        # based on its working directory (older versions).
+        # The paths of this workflow come from the configured version, so
+        # outputs of another major.minor version are rejected.
+        version = check_fmriprep_version(self.config['fmriprep_out'], self.config['fmriprep_version'])
+        major = version.split('.')[0]
+        if major.isdigit() and int(major) >= 25:
+            args = dict(
+                sid=self.sid, bids_dir=self.config['bids_dir'],
+                fmriprep_dir=os.path.dirname(self.fmriprep_out), out_dir=self.resample_dir,
+                xform_dir=self.xform_dir, coverage_dir=os.path.join(self.confound_dir, 'coverage'),
+                combinations=self.config['combinations'], fs_dir=self.freesurfer_out,
+                filter_=filter_, n_jobs=self.config['n_procs'])
+            args.update(kwargs)
+            resample_surfaces(**args)
+            return True, ''
+
         args = dict(
             sid=self.sid, bids_dir=self.config['bids_dir'],
             fs_dir=self.freesurfer_out, wf_root=self.work_out, out_dir=self.resample_dir, xform_dir=self.xform_dir,
