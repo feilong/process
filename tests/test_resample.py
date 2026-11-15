@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import nibabel as nib
 from process.resample import interpolate
@@ -452,3 +454,125 @@ def test_resample_run_outside_fieldmap(run_files, tmp_path):
         warnings.simplefilter('error')
         resample_run(small, bids_dir, coords, max_outside_fieldmap=1.0)
         resample_run(dict(run, fieldmap=dict(run['fieldmap'], ref_fn=None)), bids_dir, coords)
+
+
+# resample_surfaces
+
+from scipy import sparse
+
+import process.resample
+from process.resample import resample_surfaces
+
+N_NATIVE = {'l': 30, 'r': 40}
+N_TEMPLATE = 12
+COMBINATIONS = [('onavg-ico32', '1step_pial_overlap'), ('native', '1step_pial_overlap')]
+
+
+@pytest.fixture
+def surface_inputs(run_files, tmp_path, monkeypatch):
+    """Surfaces and transforms for the run of `run_files`; `find_runs` returns that run."""
+    run, bids_dir, c, b = run_files
+    rng = np.random.default_rng(5)
+    surfaces, xforms = {}, {}
+    for lr in 'lr':
+        ijk = _interior(rng, 2, N_NATIVE[lr], margin=3.0)
+        ijk[:, 1] = ijk[:, 0] + rng.normal(0, 0.5, (3, N_NATIVE[lr]))
+        surfaces[lr] = tuple(_t1w_coords(run, ijk))  # white, pial
+        xform = sparse.random(N_NATIVE[lr], N_TEMPLATE, density=0.3, random_state=rng, format='lil')
+        xform[:, 0] = 0  # a template vertex without native vertices
+        xform[0, 1:] = 1.0
+        xforms[lr] = xform.tocsr()
+        fn = tmp_path / 'xforms' / 'onavg-ico32' / f'01_overlap_{lr}h.npz'
+        fn.parent.mkdir(parents=True, exist_ok=True)
+        sparse.save_npz(fn, xforms[lr])
+    calls = []
+
+    def find_runs(fmriprep_dir, bids_dir, sid, filter_=None, **kwargs):
+        calls.append((fmriprep_dir, sid, filter_, kwargs))
+        return [run]
+
+    monkeypatch.setattr(process.resample, 'find_runs', find_runs)
+    monkeypatch.setattr(process.resample, 'load_surfaces',
+                        lambda fmriprep_dir, sid, lr, fs_dir=None: surfaces[lr])
+    dirs = dict(out_dir=str(tmp_path / 'resampled'), xform_dir=str(tmp_path / 'xforms'),
+                coverage_dir=str(tmp_path / 'confounds' / 'coverage'))
+    return run, bids_dir, surfaces, xforms, dirs, calls
+
+
+def test_resample_surfaces(surface_inputs):
+    run, bids_dir, surfaces, xforms, dirs, calls = surface_inputs
+    resample_surfaces('01', bids_dir, 'fmriprep', combinations=COMBINATIONS,
+                      no_fieldmap=('task-y',), **dirs)
+    assert calls == [('fmriprep', '01', None, {'no_fieldmap': ('task-y',), 'fieldmap_prefix': None})]
+
+    ratios = np.array([0.1, 0.3, 0.5, 0.7, 0.9])[:, None, None]
+    for lr in 'lr':
+        white, pial = surfaces[lr]
+        native, native_cov = resample_run(run, bids_dir, white * ratios + pial * (1 - ratios))
+        w = xforms[lr].toarray()
+        w[:, 1:] /= w[:, 1:].sum(axis=0)
+        for space, expected, expected_cov in [
+                ('native', native, native_cov), ('onavg-ico32', native @ w, native_cov @ w)]:
+            rel = f'{space}/{lr}-cerebrum/1step_pial_overlap/sub-01_task-x.npy'
+            data = np.load(f"{dirs['out_dir']}/{rel}")
+            coverage = np.load(f"{dirs['coverage_dir']}/{rel}")
+            assert data.dtype == coverage.dtype == np.float64
+            assert data.shape == (SHAPE[3], expected.shape[1]) and coverage.shape == data.shape[1:]
+            np.testing.assert_allclose(data, expected, atol=1e-9)
+            np.testing.assert_allclose(coverage, expected_cov, atol=1e-12)
+        template = np.load(f"{dirs['out_dir']}/onavg-ico32/{lr}-cerebrum/1step_pial_overlap/sub-01_task-x.npy")
+        np.testing.assert_array_equal(template[:, 0], 0.0)  # no native vertices
+
+
+def test_resample_surfaces_skips_existing(surface_inputs, monkeypatch):
+    run, bids_dir, surfaces, xforms, dirs, calls = surface_inputs
+    resample_surfaces('01', bids_dir, 'fmriprep', combinations=COMBINATIONS, **dirs)
+    fn = f"{dirs['out_dir']}/onavg-ico32/r-cerebrum/1step_pial_overlap/sub-01_task-x.npy"
+    other = f"{dirs['out_dir']}/onavg-ico32/l-cerebrum/1step_pial_overlap/sub-01_task-x.npy"
+    expected = np.load(fn)
+    os.remove(fn)
+    np.save(other, np.zeros(3))  # existing outputs are not rewritten
+    resample_surfaces('01', bids_dir, 'fmriprep', combinations=COMBINATIONS, **dirs)
+    np.testing.assert_array_equal(np.load(fn), expected)
+    np.testing.assert_array_equal(np.load(other), np.zeros(3))
+
+    # Only the missing file of a pair is written
+    coverage_fn = fn.replace(dirs['out_dir'], dirs['coverage_dir'])
+    expected_coverage = np.load(coverage_fn)
+    os.remove(coverage_fn)
+    np.save(fn, np.ones(3))
+    resample_surfaces('01', bids_dir, 'fmriprep', combinations=COMBINATIONS, **dirs)
+    np.testing.assert_array_equal(np.load(coverage_fn), expected_coverage)
+    np.testing.assert_array_equal(np.load(fn), np.ones(3))
+    os.remove(fn)
+    np.save(coverage_fn, np.ones(3))
+    resample_surfaces('01', bids_dir, 'fmriprep', combinations=COMBINATIONS, **dirs)
+    np.testing.assert_array_equal(np.load(fn), expected)
+    np.testing.assert_array_equal(np.load(coverage_fn), np.ones(3))
+
+    # Nothing is loaded when everything exists
+    monkeypatch.setattr(process.resample, 'load_surfaces', None)
+    resample_surfaces('01', bids_dir, 'fmriprep', combinations=COMBINATIONS, **dirs)
+
+
+def test_resample_surfaces_errors(surface_inputs):
+    run, bids_dir, surfaces, xforms, dirs, calls = surface_inputs
+    with pytest.raises(ValueError, match='Unsupported tag'):
+        resample_surfaces('01', bids_dir, 'fmriprep', combinations=[('onavg-ico32', '1step_pial_area')], **dirs)
+    for n_depths in [1.1, 5.0, 0, -1, True, '5', None, np.float64(5)]:
+        with pytest.raises(ValueError, match='n_depths'):
+            resample_surfaces('01', bids_dir, 'fmriprep', combinations=COMBINATIONS, n_depths=n_depths, **dirs)
+    assert not calls
+    assert not os.path.exists(dirs['out_dir'])
+    with pytest.raises(FileNotFoundError, match='xform step'):
+        resample_surfaces('01', bids_dir, 'fmriprep', combinations=[('onavg-ico64', '1step_pial_overlap')], **dirs)
+
+
+def test_resample_surfaces_n_depths(surface_inputs):
+    run, bids_dir, surfaces, xforms, dirs, calls = surface_inputs
+    resample_surfaces('01', bids_dir, 'fmriprep', combinations=[('native', '1step_pial_overlap')],
+                      n_depths=np.int64(1), **dirs)
+    white, pial = surfaces['l']
+    expected, _ = resample_run(run, bids_dir, ((white + pial) / 2)[None])
+    data = np.load(f"{dirs['out_dir']}/native/l-cerebrum/1step_pial_overlap/sub-01_task-x.npy")
+    np.testing.assert_allclose(data, expected, atol=1e-9)

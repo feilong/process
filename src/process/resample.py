@@ -1,4 +1,5 @@
 import numbers
+import os
 
 import numpy as np
 import nibabel as nib
@@ -8,7 +9,11 @@ import h5py
 import nitransforms as nt
 from nitransforms.io.itk import ITKCompositeH5
 
+from joblib import Parallel, delayed
+from scipy import sparse
+
 from .fieldmap import fieldmap_shift, load_fieldmap, outside_fieldmap
+from .fmriprep import find_runs, load_surfaces
 from .metadata import distortion_parameters
 
 
@@ -300,6 +305,226 @@ def resample_run(run, bids_dir, coords, *, order=1, max_outside_fieldmap=0.05):
                     "fieldmap's field of view; their distortion correction is extrapolated.")
 
     return sample_bold(np.asanyarray(img.dataobj), hmc, ijk, fieldmap, order=order)
+
+
+def _resample_surfaces_run(run, bids_dir, coords, n_left_vertices, todo):
+    """Sample both hemispheres once and write the missing outputs for a run.
+
+    ``coords`` maps 'l' and 'r' to T1w-space arrays of shape (D, N, 3).
+    Concatenate the hemispheres along the vertex axis for one
+    :func:`resample_run` call, then split at ``n_left_vertices``.
+    ``todo`` maps each hemisphere to (transform, data path, coverage path)
+    tuples. Transforms are column-normalized sparse native-to-template
+    matrices, or None for native output. Existing files are skipped
+    individually. Image loading, transformation, and write errors propagate.
+    """
+    values, coverage = resample_run(run, bids_dir, np.concatenate([coords[lr] for lr in 'lr'], axis=1))
+    for i, lr in enumerate('lr'):
+        sl = slice(0, n_left_vertices) if i == 0 else slice(n_left_vertices, None)
+        for xform, out_fn, coverage_fn in todo[lr]:
+            for data, fn in [(values[:, sl], out_fn), (coverage[sl], coverage_fn)]:
+                if os.path.exists(fn):
+                    continue
+                if xform is not None:
+                    data = data @ xform
+                os.makedirs(os.path.dirname(fn), exist_ok=True)
+                np.save(fn, data)
+                print(data.shape, data.dtype, fn)
+
+
+def resample_surfaces(
+        sid, bids_dir, fmriprep_dir, out_dir, xform_dir, coverage_dir, combinations, *,
+        fs_dir=None, filter_=None, n_depths=5, n_jobs=1, no_fieldmap=(), fieldmap_prefix=None):
+    """Resample a subject's selected BOLD runs and save surface time series.
+
+    Each run is sampled from the raw data at several depths between the
+    white and pial surfaces with :func:`resample_run`. Both hemispheres
+    are sampled together, with motion correction, distortion correction
+    when available, and coregistration applied in one interpolation.
+    Samples are averaged equally across depths, then mapped from native
+    vertices to the requested template surfaces.
+
+    Parameters
+    ----------
+    sid : str
+        Subject ID without the ``sub-`` prefix.
+    bids_dir : str or os.PathLike
+        Raw BIDS dataset root, containing ``sub-<sid>``.
+    fmriprep_dir : str or os.PathLike
+        fMRIPrep derivative dataset root, containing ``sub-<sid>``. Runs
+        and surfaces are discovered with :func:`process.fmriprep.find_runs`
+        and :func:`process.fmriprep.load_surfaces`.
+    out_dir : str or os.PathLike
+        Root for sampled BOLD intensities, saved as
+        ``<out_dir>/<space>/<l|r>-cerebrum/<tag>/sub-<sid>_<label>.npy``,
+        as float64 arrays of shape (T, V): volumes by output vertices.
+        ``label`` is the run label returned by ``find_runs``, including
+        session and other raw BOLD entities but excluding ``sub-<sid>``.
+    xform_dir : str or os.PathLike
+        Root for native-to-template overlap matrices, stored at
+        ``<xform_dir>/<space>/<sid>_overlap_<l|r>h.npz`` by
+        :func:`process.transform.xform_workflow`. Each sparse matrix has
+        shape (N, V), with native vertices in the same order as the loaded
+        surfaces. Columns are normalized in memory; source files are not
+        changed. No matrix is read for the space ``'native'``.
+    coverage_dir : str or os.PathLike
+        Separate output root for float64 coverage arrays of shape (V,),
+        using the same relative paths as the time series. At each native
+        vertex, coverage is the fraction of depth-by-volume sampling
+        positions inside the raw BOLD field of view after motion and
+        distortion correction, before boundary clipping. Template coverage
+        is the overlap-weighted average of native coverage. It does not
+        measure fieldmap coverage or signal quality; see :func:`sample_bold`.
+    combinations : iterable of (str, str)
+        Pairs of space and tag, such as
+        ``('onavg-ico32', '1step_pial_overlap')``. The only supported tag
+        is ``'1step_pial_overlap'``. The space ``'native'`` keeps the
+        subject's own vertices.
+    fs_dir : str or os.PathLike or None, optional
+        The individual subject's FreeSurfer directory, containing ``surf``.
+        Used as a fallback when fMRIPrep's GIFTI surfaces are absent;
+        incomplete or ambiguous pairs remain errors. Default is None,
+        meaning no fallback. See :func:`process.fmriprep.load_surfaces`.
+    filter_ : callable or None, optional
+        Receives the sorted list of raw BOLD paths once and returns the
+        list to process, optionally reordered. This is a list-to-list
+        function, not a predicate applied to each file. Default is None,
+        selecting all discovered runs; see :func:`process.fmriprep.find_runs`.
+    n_depths : int, optional
+        Number of sampling depths, at the centers of ``n_depths`` equal
+        intervals between white and pial. A positive integer; floats and
+        booleans are rejected. Python and NumPy integer scalars are
+        accepted. Default is 5, sampling fractions 0.1, 0.3, 0.5, 0.7, and
+        0.9; 1 samples the midpoint. White and pial boundaries are excluded.
+    n_jobs : int, optional
+        Joblib parallelism setting for processing runs. Default is 1
+        (sequential). Each worker loads a full raw BOLD run and holds its
+        sampled arrays in memory, so memory use grows with concurrency.
+    no_fieldmap : collection of str, optional
+        Run labels explicitly allowed to lack a fieldmap transform. Default
+        is empty. Passed to :func:`process.fmriprep.find_runs`; this cannot
+        disable an existing fieldmap transform.
+    fieldmap_prefix : mapping of str to str or None, optional
+        Run label to coefficient basename prefix before ``_fmapid-``, used
+        to select a fieldmap when IDs are reused. Default is None. Passed
+        to :func:`process.fmriprep.find_runs`, which documents precedence,
+        label validation, and provenance matching.
+
+    Returns
+    -------
+    None
+        Results are written to ``out_dir`` and ``coverage_dir``.
+
+    Raises
+    ------
+    ValueError
+        If a tag is not supported, ``n_depths`` is not a positive integer,
+        or run discovery, surface loading, or sampling rejects an input.
+    FileNotFoundError
+        If an overlap matrix or other required input is missing, or no
+        BOLD runs remain after filtering.
+
+    Warns
+    -----
+    UserWarning
+        From :func:`resample_run` when more than 5% of the sampling positions
+        across both hemispheres lie outside the available fieldmap grid.
+
+    See Also
+    --------
+    resample_run : Sample a single run at arbitrary T1w-space positions.
+    process.fmriprep.find_runs : Discover runs and resolve fieldmap inputs.
+    process.fmriprep.load_surfaces : Load paired surfaces in T1w space.
+
+    Notes
+    -----
+    This wrapper uses linear BOLD interpolation and the default fieldmap
+    warning threshold of :func:`resample_run`. It applies no Jacobian
+    intensity modulation. Clipped BOLD samples contribute to the averages;
+    coverage is saved separately and is not used as a weight or mask.
+
+    Template-space values are weighted averages of native vertices: each
+    column of the transform is normalized to sum to 1. Coverage is mapped
+    the same way. Template vertices without overlapping native vertices get
+    0 for both.
+
+    Existing files are never rewritten. A run is skipped when all of its
+    output files exist; otherwise only the missing files are written, so a
+    data file can get its coverage later (or the reverse). Such a file is
+    computed with the current code and settings, which its existing
+    counterpart may not have been. Existence is the only completion check;
+    existing files are not opened or validated. Run discovery and its
+    input-path checks still occur before skipping. Surfaces and overlap
+    matrices are loaded only if some output is missing; then both
+    hemispheres and every requested template space's matrices are loaded.
+
+    All relative directory arguments are resolved against the current
+    working directory. Output subdirectories are created as needed.
+    Other image-reading, metadata, parallel-execution, and write errors
+    propagate. A failure can leave some outputs already written.
+
+    Examples
+    --------
+    Save native and template time series with separate coverage files::
+
+        resample_surfaces(
+            '01', '/data/bids', '/data/fmriprep',
+            out_dir='/data/resampled',
+            xform_dir='/data/xforms',
+            coverage_dir='/data/coverage',
+            combinations=[('native', '1step_pial_overlap'),
+                          ('onavg-ico32', '1step_pial_overlap')],
+            fs_dir='/data/freesurfer/sub-01',
+        )
+    """
+    if (isinstance(n_depths, (bool, np.bool_)) or not isinstance(n_depths, numbers.Integral)
+            or n_depths < 1):
+        raise ValueError(f'n_depths must be a positive integer, got {n_depths!r}')
+    combinations = [tuple(_) for _ in combinations]
+    for space, tag in combinations:
+        if tag != '1step_pial_overlap':
+            raise ValueError(f"Unsupported tag {tag!r} for {space}; only '1step_pial_overlap' is supported")
+    runs = find_runs(fmriprep_dir, bids_dir, sid, filter_,
+                     no_fieldmap=no_fieldmap, fieldmap_prefix=fieldmap_prefix)
+
+    def out_fns(run, lr, space, tag):
+        rel = os.path.join(space, f'{lr}-cerebrum', tag, f"sub-{sid}_{run['label']}.npy")
+        return os.path.join(out_dir, rel), os.path.join(coverage_dir, rel)
+
+    def missing(run, lr):
+        return [(space, *fns) for space, tag in combinations
+                for fns in [out_fns(run, lr, space, tag)]
+                if not all(os.path.exists(fn) for fn in fns)]
+
+    runs = [run for run in runs if any(missing(run, lr) for lr in 'lr')]
+    if not runs:
+        return
+
+    ratios = ((np.arange(n_depths) + 0.5) / n_depths)[:, np.newaxis, np.newaxis]
+    coords, xforms = {}, {}
+    for lr in 'lr':
+        white, pial = load_surfaces(fmriprep_dir, sid, lr, fs_dir=fs_dir)
+        coords[lr] = white * ratios + pial * (1 - ratios)
+        for space in {space for space, tag in combinations}:
+            if space == 'native':
+                xforms[lr, space] = None
+                continue
+            xform_fn = os.path.join(xform_dir, space, f'{sid}_overlap_{lr}h.npz')
+            if not os.path.exists(xform_fn):
+                raise FileNotFoundError(
+                    f'Transform {xform_fn} not found; compute it first (the xform step).')
+            xform = sparse.load_npz(xform_fn)
+            total = np.asarray(xform.sum(axis=0)).ravel()
+            scale = np.divide(1.0, total, out=np.zeros_like(total, dtype=np.float64), where=total > 0)
+            xforms[lr, space] = (xform @ sparse.diags(scale)).tocsr()
+    n_left_vertices = coords['l'].shape[1]
+
+    jobs = []
+    for run in runs:
+        todo = {lr: [(xforms[lr, space], out_fn, coverage_fn)
+                     for space, out_fn, coverage_fn in missing(run, lr)] for lr in 'lr'}
+        jobs.append(delayed(_resample_surfaces_run)(run, bids_dir, coords, n_left_vertices, todo))
+    Parallel(n_jobs=n_jobs)(jobs)
 
 
 def interpolate(img, ijk, fill=np.nan, kwargs={'order': 1}):
