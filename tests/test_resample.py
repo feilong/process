@@ -690,6 +690,9 @@ def test_check_outputs(checked_outputs):
     # The template vertex without native vertices has no signal and no coverage
     assert outputs[REL]['n_low_signal'] >= 1 and outputs[REL]['n_low_coverage'] >= 1
     assert f"{REL}: {outputs[REL]['n_low_coverage']} vertices with low coverage" in report['warnings']
+    # Runs selected by the caller are not selected again
+    calls.clear()
+    assert check(runs=[], filter_=len) == {'runs': {}, 'errors': [], 'warnings': []} and calls == []
     # Thresholds
     mean = np.load(os.path.join(dirs['out_dir'], REL)).mean(axis=0)
     coverage = np.load(os.path.join(dirs['coverage_dir'], REL))

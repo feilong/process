@@ -1,3 +1,5 @@
+import json
+import math
 import os
 import subprocess
 import shutil
@@ -6,10 +8,10 @@ import tarfile
 from datetime import datetime
 from joblib import Parallel, delayed
 
-from .fmriprep import fmriprep_cmd, fmriprep_success, check_fmriprep_version
+from .fmriprep import fmriprep_cmd, fmriprep_success, check_fmriprep_version, find_runs
 from .compression import copy_files_to_lzma_tar
 from .resample_workflow import resample_workflow
-from .resample import resample_surfaces
+from .resample import resample_surfaces, check_outputs, check_sdc
 from .confound import confound_workflow
 from .events import events_workflow
 from .transform import xform_workflow
@@ -211,6 +213,71 @@ class PreprocessWorkflow(object):
         resample_workflow(**args)
         return True, ''
 
+    def _check(self, filter_=None, n_frames=40, **kwargs):
+        """Build the output and SDC report without writing it or exiting.
+
+        Select runs once and share them between both checks. Discovery
+        failures return a report with no runs; output-file and per-run SDC
+        failures are recorded while the remaining checks continue. Argument
+        errors and unexpected failures outside those checks propagate.
+        Version validation and JSON writing belong to :meth:`check`.
+        """
+        report = {'sid': self.sid, 'runs': {}, 'errors': [], 'warnings': []}
+        errors, warns = report['errors'], report['warnings']
+        args = dict(
+            sid=self.sid, bids_dir=self.config['bids_dir'],
+            fmriprep_dir=os.path.dirname(self.fmriprep_out), out_dir=self.resample_dir,
+            xform_dir=self.xform_dir, coverage_dir=os.path.join(self.confound_dir, 'coverage'),
+            combinations=self.config['combinations'], fs_dir=self.freesurfer_out, filter_=filter_)
+        args.update(kwargs)
+        # Settings of `resample` that do not affect which files exist
+        for key in ['n_jobs', 'n_depths']:
+            args.pop(key, None)
+        unknown = sorted(set(args) - {
+            'sid', 'bids_dir', 'fmriprep_dir', 'out_dir', 'xform_dir', 'coverage_dir', 'combinations',
+            'fs_dir', 'filter_', 'no_fieldmap', 'fieldmap_prefix', 'low_signal', 'low_coverage'})
+        if unknown:
+            raise TypeError(f'Unsupported arguments for the check step: {unknown}')
+        # The runs are selected once, for both the files and the SDC check
+        try:
+            runs = find_runs(
+                args['fmriprep_dir'], args['bids_dir'], args['sid'], args.pop('filter_'),
+                no_fieldmap=args.pop('no_fieldmap', ()), fieldmap_prefix=args.pop('fieldmap_prefix', None))
+        except Exception as e:
+            errors.append(f'cannot find the runs ({type(e).__name__}: {e})')
+            return report
+        outputs = check_outputs(runs=runs, **args)
+        report['runs'] = outputs['runs']
+        errors += outputs['errors']
+        warns += outputs['warnings']
+
+        for run in runs:
+            label = run['label']
+            if run['fieldmap'] is None:
+                sdc = {'status': 'skipped'}
+                warns.append(f'{label}: SDC not checked (no fieldmap)')
+            else:
+                try:
+                    sdc = check_sdc(run, args['bids_dir'], n_frames)
+                except Exception as e:
+                    sdc = {}
+                    errors.append(f'{label}: SDC check failed ({type(e).__name__}: {e})')
+                finite = bool(sdc) and all(math.isfinite(_) for _ in sdc.values())
+                sdc = {key: (value if math.isfinite(value) else None) for key, value in sdc.items()}
+                if not finite:
+                    sdc['status'] = 'inconclusive'
+                    if sdc.keys() != {'status'}:
+                        errors.append(f'{label}: SDC check has nonfinite values')
+                elif sdc['r_sdc'] <= sdc['r_nosdc']:
+                    sdc['status'] = 'not_improved'
+                    warns.append(
+                        f"{label}: SDC does not improve the correlation with fMRIPrep's reference "
+                        f"({sdc['r_sdc']:.4f} with, {sdc['r_nosdc']:.4f} without)")
+                else:
+                    sdc['status'] = 'ok'
+            report['runs'].setdefault(label, {})['sdc'] = sdc
+        return report
+
     def _run_confound(self, filter_):
         confound_workflow(self.fmriprep_out, self.confound_dir, filter_=filter_)
         return True, ''
@@ -311,6 +378,115 @@ class PreprocessWorkflow(object):
 
     def resample(self, filter_=None, log_name=None, **kwargs):
         return self._run_method('resample', filter_=filter_, log_name=log_name, **kwargs)
+
+    def check(self, filter_=None, **kwargs):
+        """Check the outputs of one-step surface resampling (fMRIPrep 25+).
+
+        Validate saved time series and coverage, then compare sampling with
+        and without susceptibility distortion correction (SDC) against
+        fMRIPrep's reference. Runs are discovered once and shared between
+        the two checks. Warnings alone do not fail the step.
+
+        Parameters
+        ----------
+        filter_ : callable or None, optional
+            Receives the sorted list of raw BOLD paths once and returns
+            the list to check. Default is None, selecting all discovered
+            runs. Use the same selection as for :meth:`resample`.
+        **kwargs
+            Optional arguments for selection, file locations, and diagnostics:
+
+            - ``no_fieldmap`` and ``fieldmap_prefix`` are passed to
+              :func:`process.fmriprep.find_runs`, with defaults of an empty
+              collection and None. Use the same overrides as for resampling.
+            - ``bids_dir``, ``fmriprep_dir``, ``out_dir``, ``xform_dir``,
+              ``coverage_dir``, ``combinations``, and ``fs_dir`` override
+              this workflow's paths and space/tag pairs, as in resampling.
+              Coverage defaults to ``<confound_dir>/coverage``. ``fs_dir``
+              is the individual subject's FreeSurfer directory. ``sid``
+              is also accepted and should match this workflow's subject;
+              report identity and destination always use ``self.sid``.
+            - ``n_frames`` is the maximum number of evenly spaced volumes
+              for each SDC comparison, default 40. It is expected to be a
+              positive integer. See :func:`process.resample.check_sdc` for
+              sampling details and memory use.
+            - ``low_signal`` and ``low_coverage`` set output-warning
+              thresholds, default 0.05 and 0.5. They are passed unchanged
+              to :func:`process.resample.check_outputs`.
+            - ``n_jobs`` and ``n_depths`` are accepted and ignored so
+              resampling settings can be reused. Checking is sequential;
+              saved arrays do not encode the sampling depth count.
+
+            Other keywords, including ``log_name`` and ``runs``, are not
+            accepted. No finish, running, or error log controls this step.
+
+        Returns
+        -------
+        bool
+            True when the report has no errors. The report itself is saved
+            to ``<output_data_root>/checks/sub-<self.sid>.json`` using the
+            configured output-data root, even when file paths are overridden.
+            Warnings are printed before returning.
+
+        Raises
+        ------
+        SystemExit
+            With status 1 if the report contains errors. The JSON is written
+            first, then warnings and errors are printed.
+        TypeError
+            If an unsupported keyword is supplied; no report is written.
+        ValueError
+            If derivative versions conflict or differ from the configured
+            major/minor version. See :func:`process.fmriprep.check_fmriprep_version`.
+        NotImplementedError
+            If the resolved fMRIPrep version is not numeric 25 or later.
+
+        Notes
+        -----
+        Every call reruns the checks and replaces the subject's JSON report,
+        including after a previous failure. Its top-level keys are ``sid``,
+        ``runs``, ``errors``, and ``warnings``. Each run has the frame count
+        and output summaries from ``check_outputs``, plus an ``sdc`` dict
+        containing the diagnostic scores and one of these statuses:
+
+        - ``ok``: all scores are finite and ``r_sdc > r_nosdc``;
+        - ``not_improved``: all scores are finite and ``r_sdc <= r_nosdc``
+          (a warning, not proof of incorrect distortion correction);
+        - ``inconclusive``: any score is nonfinite or the diagnostic raises
+          (an error). Nonfinite scores become JSON null; a failed diagnostic
+          has only its status, with the exception described in ``errors``;
+        - ``skipped``: no fieldmap is available (a warning). Discovery allows
+          this for acknowledged ``no_fieldmap`` runs and subjects with no
+          fieldmaps at all; other missing-fieldmap cases fail discovery.
+
+        A discovery failure is recorded with an empty ``runs`` mapping and
+        prevents both checks. Once discovery succeeds, reported file errors
+        do not prevent SDC checks, and an SDC failure does not prevent checks
+        of later runs. JSON uses ``allow_nan=False``. Unexpected exceptions
+        and report-writing failures propagate; a report is not guaranteed
+        in those cases or for version and unsupported-keyword errors.
+
+        See Also
+        --------
+        process.resample.check_outputs : Validate saved arrays and summarize signal and coverage.
+        process.resample.check_sdc : Compute correlations and signed fieldmap shift percentiles.
+        """
+        version = check_fmriprep_version(self.config['fmriprep_out'], self.config['fmriprep_version'])
+        major = version.split('.')[0]
+        if not (major.isdigit() and int(major) >= 25):
+            raise NotImplementedError(f'Checks need outputs of fMRIPrep 25 or later, not {version}.')
+        report = self._check(filter_, **kwargs)
+        fn = os.path.join(self.config['output_data_root'], 'checks', f'sub-{self.sid}.json')
+        os.makedirs(os.path.dirname(fn), exist_ok=True)
+        with open(fn, 'w') as f:
+            json.dump(report, f, indent=2, allow_nan=False)
+        for message in report['warnings']:
+            print(f'Warning: {message}')
+        if report['errors']:
+            for message in report['errors']:
+                print(f'Error: {message}')
+            exit(1)
+        return True
 
     def compress(self):
         return self._run_method('compress')

@@ -684,7 +684,7 @@ def _check_array(fn, shape):
 def check_outputs(
         sid, bids_dir, fmriprep_dir, out_dir, xform_dir, coverage_dir, combinations, *,
         fs_dir=None, filter_=None, no_fieldmap=(), fieldmap_prefix=None,
-        low_signal=0.05, low_coverage=0.5):
+        low_signal=0.05, low_coverage=0.5, runs=None):
     """Check the files written by :func:`resample_surfaces` for a subject.
 
     Inspect both time series and coverage for every selected run,
@@ -699,11 +699,13 @@ def check_outputs(
         Subject ID without the ``sub-`` prefix.
     bids_dir : str or os.PathLike
         Raw BIDS dataset root. BOLD headers provide the expected number
-        of volumes, T; raw BOLD intensities are not loaded.
+        of volumes, T; raw BOLD intensities are not loaded. Used for run
+        discovery only when ``runs`` is None.
     fmriprep_dir : str or os.PathLike
-        Derivative dataset root containing ``sub-<sid>``. Runs are selected
-        with :func:`process.fmriprep.find_runs`, including its checks for
-        required transform and fieldmap paths.
+        Derivative dataset root containing ``sub-<sid>``. Used for native
+        surface loading and, when ``runs`` is None, run discovery with
+        :func:`process.fmriprep.find_runs`, including its checks for required
+        transform and fieldmap paths.
     out_dir : str or os.PathLike
         Root of float64 time series with shape (T, V), at
         ``<space>/<l|r>-cerebrum/<tag>/sub-<sid>_<label>.npy`` relative to
@@ -746,6 +748,15 @@ def check_outputs(
         positions within the raw BOLD field of view after motion and
         distortion correction. Template coverage is its overlap-weighted
         average; vertices without native overlap have coverage zero.
+    runs : list of dict or None, optional
+        Runs already selected with ``find_runs``, in the order to check.
+        Only ``'label'`` and ``'bold_fn'`` are used. They must belong to
+        ``sid`` and have unique labels. Default is None, which discovers
+        runs here. Any supplied list, including an empty one, bypasses
+        discovery: ``filter_`` is not called, ``no_fieldmap`` and
+        ``fieldmap_prefix`` are ignored, and derivative transform and
+        fieldmap paths are not revalidated. This lets a caller share one
+        selection between output checks and other diagnostics.
 
     Returns
     -------
@@ -771,9 +782,10 @@ def check_outputs(
     Raises
     ------
     ValueError, FileNotFoundError
-        Run-discovery failures propagate before any outputs are checked.
-        Other exceptions not handled by the file readers also propagate;
-        malformed GIFTI XML or ZIP archives can currently abort the check.
+        Run-discovery failures propagate before any outputs are checked
+        when ``runs`` is None. Reader failures during file validation are
+        recorded in the report instead. Invalid caller-supplied structures
+        and unexpected exceptions outside file reading can still propagate.
 
     See Also
     --------
@@ -801,8 +813,9 @@ def check_outputs(
     current inputs or resampling settings.
     """
     combinations = [tuple(_) for _ in combinations]
-    runs = find_runs(fmriprep_dir, bids_dir, sid, filter_,
-                     no_fieldmap=no_fieldmap, fieldmap_prefix=fieldmap_prefix)
+    if runs is None:
+        runs = find_runs(fmriprep_dir, bids_dir, sid, filter_,
+                         no_fieldmap=no_fieldmap, fieldmap_prefix=fieldmap_prefix)
     errors, warns, report = [], [], {}
 
     n_vertices = {}
