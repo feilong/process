@@ -580,7 +580,7 @@ def test_resample_surfaces_n_depths(surface_inputs):
 
 # check_sdc
 
-from process.resample import check_sdc
+from process.resample import check_sdc, check_outputs
 
 
 def _truth(ijk):
@@ -660,3 +660,140 @@ def test_check_sdc_part_entity(distorted_run):
         check_sdc(run, bids_dir)
     os.rename(ref_fn, ref_fn.replace('_desc-coreg', '_part-mag_desc-coreg'))
     assert check_sdc(run, bids_dir) == expected
+
+
+@pytest.fixture
+def checked_outputs(surface_inputs):
+    run, bids_dir, surfaces, xforms, dirs, calls = surface_inputs
+    resample_surfaces('01', bids_dir, 'fmriprep', combinations=COMBINATIONS, **dirs)
+    calls.clear()
+
+    def check(**kwargs):
+        return check_outputs('01', bids_dir, 'fmriprep', combinations=COMBINATIONS, **dirs, **kwargs)
+    return check, dirs, calls
+
+
+REL = 'onavg-ico32/l-cerebrum/1step_pial_overlap/sub-01_task-x.npy'
+
+
+def test_check_outputs(checked_outputs):
+    check, dirs, calls = checked_outputs
+    report = check(filter_=len, no_fieldmap=('task-y',), fieldmap_prefix={'a': 'b'})
+    assert calls == [('fmriprep', '01', len, {'no_fieldmap': ('task-y',), 'fieldmap_prefix': {'a': 'b'}})]
+    json.dumps(report, allow_nan=False)
+    assert report['errors'] == []
+    assert list(report['runs']) == ['task-x'] and report['runs']['task-x']['n_frames'] == SHAPE[3]
+    outputs = report['runs']['task-x']['outputs']
+    assert len(outputs) == 4
+    assert outputs[REL]['n_vertices'] == N_TEMPLATE
+    assert outputs['native/r-cerebrum/1step_pial_overlap/sub-01_task-x.npy']['n_vertices'] == N_NATIVE['r']
+    # The template vertex without native vertices has no signal and no coverage
+    assert outputs[REL]['n_low_signal'] >= 1 and outputs[REL]['n_low_coverage'] >= 1
+    assert f"{REL}: {outputs[REL]['n_low_coverage']} vertices with low coverage" in report['warnings']
+    # Thresholds
+    mean = np.load(os.path.join(dirs['out_dir'], REL)).mean(axis=0)
+    coverage = np.load(os.path.join(dirs['coverage_dir'], REL))
+    for low_signal, low_coverage in [(0.05, 0.5), (0.5, 0.9), (2.0, -1.0)]:
+        out = check(low_signal=low_signal, low_coverage=low_coverage)['runs']['task-x']['outputs'][REL]
+        assert out['median_mean'] == np.median(mean)
+        assert out['n_low_signal'] == np.sum(mean < low_signal * np.median(mean))
+        assert out['n_low_coverage'] == np.sum(coverage < low_coverage)
+    assert out['n_low_coverage'] == 0
+
+
+def _rewrite(fn, func):
+    data = func(np.load(fn))
+    np.save(fn, data)
+
+
+@pytest.mark.parametrize('name, which, func, message', [
+    ('nan', 'out_dir', lambda d: np.where(np.arange(d.size).reshape(d.shape) == 3, np.nan, d),
+     f'{REL}: 1 nonfinite values'),
+    ('inf', 'out_dir', lambda d: np.where(np.arange(d.size).reshape(d.shape) < 2, -np.inf, d),
+     f'{REL}: 2 nonfinite values'),
+    ('dtype', 'out_dir', lambda d: d.astype(np.float32), f'{REL}: dtype float32, expected float64'),
+    ('frames', 'out_dir', lambda d: d[:-1],
+     f'{REL}: shape {(SHAPE[3] - 1, N_TEMPLATE)}, expected {(SHAPE[3], N_TEMPLATE)}'),
+    ('vertices', 'out_dir', lambda d: d[:, :-1],
+     f'{REL}: shape {(SHAPE[3], N_TEMPLATE - 1)}, expected {(SHAPE[3], N_TEMPLATE)}'),
+    ('cov-inf', 'coverage_dir', lambda d: np.where(np.arange(d.size) == 1, np.inf, d),
+     f'{REL}: coverage: 1 nonfinite values'),
+    ('cov-shape', 'coverage_dir', lambda d: d[None],
+     f'{REL}: coverage: shape {(1, N_TEMPLATE)}, expected {(N_TEMPLATE,)}'),
+    ('cov-high', 'coverage_dir', lambda d: np.where(np.arange(d.size) == 1, 1.001, d),
+     f'{REL}: coverage: values outside [0, 1]'),
+    ('cov-low', 'coverage_dir', lambda d: np.where(np.arange(d.size) == 1, -0.001, d),
+     f'{REL}: coverage: values outside [0, 1]'),
+])
+def test_check_outputs_errors(checked_outputs, name, which, func, message):
+    check, dirs, calls = checked_outputs
+    _rewrite(os.path.join(dirs[which], REL), func)
+    report = check()
+    assert len(report['errors']) == 1 and report['errors'][0].startswith(message)
+    # The pair is left out of the summaries; the other files are still checked
+    outputs = report['runs']['task-x']['outputs']
+    assert REL not in outputs and len(outputs) == 3
+    json.dumps(report, allow_nan=False)
+
+
+def test_check_outputs_coverage_tolerance(checked_outputs):
+    check, dirs, calls = checked_outputs
+    _rewrite(os.path.join(dirs['coverage_dir'], REL),
+             lambda d: np.where(np.arange(d.size) == 1, 1 + 1e-9, d))
+    assert check()['errors'] == []
+
+
+def test_check_outputs_missing_and_unreadable(checked_outputs):
+    check, dirs, calls = checked_outputs
+    os.remove(os.path.join(dirs['out_dir'], REL))
+    other = REL.replace('l-cerebrum', 'r-cerebrum')
+    with open(os.path.join(dirs['coverage_dir'], other), 'wb') as f:
+        f.write(b'not an array')
+    errors = check()['errors']
+    assert len(errors) == 2
+    assert errors[0] == f'{REL}: missing'
+    assert errors[1].startswith(f'{other}: coverage: unreadable')
+
+
+def test_check_outputs_unreadable_inputs(checked_outputs, surface_inputs):
+    check, dirs, calls = checked_outputs
+    run = surface_inputs[0]
+    os.remove(os.path.join(dirs['xform_dir'], 'onavg-ico32', '01_overlap_lh.npz'))
+    with open(run['bold_fn'], 'wb') as f:
+        f.write(b'not an image')
+    report = check()
+    assert len(report['errors']) == 2
+    assert report['errors'][0].startswith('onavg-ico32 lh: cannot get the number of vertices')
+    assert report['errors'][1].startswith('task-x: cannot get the number of volumes')
+    # Files are still checked, without the unknown dimensions
+    assert report['runs']['task-x']['n_frames'] is None
+    assert len(report['runs']['task-x']['outputs']) == 4
+    _rewrite(os.path.join(dirs['out_dir'], REL), lambda d: d[0])
+    errors = check()['errors']
+    assert len(errors) == 3 and errors[2].startswith(f"{REL}: shape ({N_TEMPLATE},), expected ('any', 'any')")
+
+
+def test_check_outputs_malformed_files(checked_outputs, monkeypatch):
+    from xml.parsers.expat import ExpatError
+    check, dirs, calls = checked_outputs
+
+    def malformed(*args, **kwargs):
+        raise ExpatError('no element found')
+    monkeypatch.setattr('process.resample.load_surfaces', malformed)
+    # A truncated overlap archive, and an NPZ archive in place of an array
+    xform_fn = os.path.join(dirs['xform_dir'], 'onavg-ico32', '01_overlap_lh.npz')
+    with open(xform_fn, 'rb') as f:
+        head = f.read(40)
+    with open(xform_fn, 'wb') as f:
+        f.write(head)
+    with open(os.path.join(dirs['out_dir'], REL), 'wb') as f:
+        np.savez(f, a=np.zeros(3))
+    report = check()
+    json.dumps(report, allow_nan=False)
+    errors = report['errors']
+    assert len(errors) == 4
+    assert errors[0].startswith('native lh: cannot get the number of vertices (ExpatError')
+    assert errors[1].startswith('onavg-ico32 lh: cannot get the number of vertices (BadZipFile')
+    assert errors[2].startswith('native rh: cannot get the number of vertices (ExpatError')
+    assert errors[3] == f'{REL}: not an NPY array'
+    assert len(report['runs']['task-x']['outputs']) == 3

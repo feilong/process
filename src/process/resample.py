@@ -646,6 +646,213 @@ def resample_surfaces(
     Parallel(n_jobs=n_jobs)(jobs)
 
 
+def _check_array(fn, shape):
+    """Load one NPY array and check its shape, dtype, and finite values.
+
+    ``fn`` is a path; ``shape`` is a tuple of expected axis lengths, with
+    None allowing any length on that axis. Rank is always checked. Loading
+    disables pickle. Return ``(data, errors)``, where errors are messages
+    without a filename prefix. Missing files, files that fail to load for
+    any reason, and files that load as something other than an array (an
+    NPZ archive) return None in place of data.
+
+    A loaded array is returned even when invalid. Finiteness is checked
+    only for float64 arrays; other dtypes already count as an error.
+    Value ranges and agreement with a companion array are not checked.
+    """
+    if not os.path.exists(fn):
+        return None, ['missing']
+    try:
+        data = np.load(fn, allow_pickle=False)
+    except Exception as e:
+        return None, [f'unreadable ({type(e).__name__}: {e})']
+    if not isinstance(data, np.ndarray):
+        if hasattr(data, 'close'):
+            data.close()
+        return None, ['not an NPY array']
+    errors = []
+    if data.ndim != len(shape) or any(n is not None and n != m for n, m in zip(shape, data.shape)):
+        expected = tuple('any' if n is None else n for n in shape)
+        errors.append(f'shape {data.shape}, expected {expected}')
+    if data.dtype != np.float64:
+        errors.append(f'dtype {data.dtype}, expected float64')
+    elif not np.all(np.isfinite(data)):
+        errors.append(f'{int(np.sum(~np.isfinite(data)))} nonfinite values')
+    return data, errors
+
+
+def check_outputs(
+        sid, bids_dir, fmriprep_dir, out_dir, xform_dir, coverage_dir, combinations, *,
+        fs_dir=None, filter_=None, no_fieldmap=(), fieldmap_prefix=None,
+        low_signal=0.05, low_coverage=0.5):
+    """Check the files written by :func:`resample_surfaces` for a subject.
+
+    Inspect both time series and coverage for every selected run,
+    hemisphere, and space/tag pair. Expected dimensions come from the raw
+    BOLD header and surfaces or overlap matrices, independently of the
+    saved outputs. This function returns a report without modifying files,
+    emitting Python warnings, or running the SDC diagnostic.
+
+    Parameters
+    ----------
+    sid : str
+        Subject ID without the ``sub-`` prefix.
+    bids_dir : str or os.PathLike
+        Raw BIDS dataset root. BOLD headers provide the expected number
+        of volumes, T; raw BOLD intensities are not loaded.
+    fmriprep_dir : str or os.PathLike
+        Derivative dataset root containing ``sub-<sid>``. Runs are selected
+        with :func:`process.fmriprep.find_runs`, including its checks for
+        required transform and fieldmap paths.
+    out_dir : str or os.PathLike
+        Root of float64 time series with shape (T, V), at
+        ``<space>/<l|r>-cerebrum/<tag>/sub-<sid>_<label>.npy`` relative to
+        this root. Labels come from ``find_runs``.
+    xform_dir : str or os.PathLike
+        Root of overlap matrices at ``<space>/<sid>_overlap_<l|r>h.npz``.
+        The number of columns gives the expected vertex count, V, for
+        each template space. No overlap matrix is read for ``'native'``.
+    coverage_dir : str or os.PathLike
+        Root of float64 coverage arrays with shape (V,), using the same
+        relative paths as the time series.
+    combinations : iterable of (str, str)
+        Space/tag pairs used for resampling, for example
+        ``('onavg-ico32', '1step_pial_overlap')``. For space ``'native'``,
+        V comes from :func:`process.fmriprep.load_surfaces`. Tags select
+        output subdirectories; this function does not validate them.
+    fs_dir : str or os.PathLike or None, optional
+        Individual subject's FreeSurfer directory, containing ``surf``.
+        Fallback for native vertex counts when fMRIPrep GIFTI surfaces
+        are absent. Default is None, meaning no fallback.
+    filter_ : callable or None, optional
+        Receives the sorted list of raw BOLD paths once and returns the
+        list to check. Default is None, selecting all discovered runs.
+    no_fieldmap : collection of str, optional
+        Run labels explicitly allowed to lack a fieldmap transform.
+        Default is empty. Passed to ``find_runs``; it does not disable
+        an existing transform.
+    fieldmap_prefix : mapping of str to str or None, optional
+        Run label to coefficient basename prefix before ``_fmapid-``,
+        passed to ``find_runs`` to resolve reused fieldmap IDs. Default
+        is None. Use the same overrides as for resampling.
+    low_signal : float, optional
+        Flag vertices whose temporal mean is strictly below this fraction
+        of the median temporal mean across the file's vertices. Default
+        is 0.05. This relative heuristic assumes positive BOLD intensities;
+        it does not flag an entirely zero file, whose median is also zero.
+    low_coverage : float, optional
+        Flag vertices whose coverage is strictly below this threshold.
+        Default is 0.5. Native coverage is the fraction of depth-by-volume
+        positions within the raw BOLD field of view after motion and
+        distortion correction. Template coverage is its overlap-weighted
+        average; vertices without native overlap have coverage zero.
+
+    Returns
+    -------
+    report : dict
+        ``'errors'`` and ``'warnings'`` contain lists of strings. Output
+        messages start with the relative NPY path; coverage errors also
+        include ``'coverage:'``. Input errors instead identify the run
+        label or space and hemisphere. Warning messages give vertex counts
+        and are included only when those counts are positive.
+
+        ``'runs'`` maps each run label to a dictionary with ``'n_frames'``
+        (an int, or None if the raw header could not be read) and
+        ``'outputs'``. The latter maps relative NPY paths to summaries with
+        ``'n_vertices'`` (int, from the saved time series), ``'median_mean'``
+        (float), ``'n_low_signal'`` (int), and ``'n_low_coverage'`` (int).
+        The median is defined as zero when there are no vertices.
+
+        A summary and its warnings are omitted if either member of the
+        time-series/coverage pair has errors. Summaries can still be
+        present when an input dimension is unknown; consult ``'errors'``
+        before treating them as validated outputs.
+
+    Raises
+    ------
+    ValueError, FileNotFoundError
+        Run-discovery failures propagate before any outputs are checked.
+        Other exceptions not handled by the file readers also propagate;
+        malformed GIFTI XML or ZIP archives can currently abort the check.
+
+    See Also
+    --------
+    resample_surfaces : Write the paired time-series and coverage arrays.
+    check_sdc : Compare sampling with and without distortion correction.
+
+    Notes
+    -----
+    File checks report missing or unreadable arrays, incorrect rank or
+    known axis lengths, dtype other than float64, and nonfinite float64
+    values. Coverage must lie within [0, 1], with an absolute tolerance
+    of 1e-6. Any failure to determine T or V is recorded as an input
+    error, and checking continues without that axis-length expectation.
+    Rank, dtype, and value checks still apply.
+
+    Low-signal and low-coverage warnings are diagnostics, not proof of an
+    incorrect output. Coverage does not measure fieldmap support or signal
+    quality. Boundary-clipped samples contribute to the saved intensities,
+    and zero-overlap template vertices have both zero signal and coverage.
+    Thresholds are used as supplied, without range or finiteness validation.
+
+    Arrays are loaded in full, one pair at a time. All relative directory
+    arguments are resolved against the current working directory. These
+    checks do not establish that existing outputs were produced with the
+    current inputs or resampling settings.
+    """
+    combinations = [tuple(_) for _ in combinations]
+    runs = find_runs(fmriprep_dir, bids_dir, sid, filter_,
+                     no_fieldmap=no_fieldmap, fieldmap_prefix=fieldmap_prefix)
+    errors, warns, report = [], [], {}
+
+    n_vertices = {}
+    for lr in 'lr':
+        for space in sorted({space for space, tag in combinations}):
+            try:
+                if space == 'native':
+                    n = load_surfaces(fmriprep_dir, sid, lr, fs_dir=fs_dir)[0].shape[0]
+                else:
+                    n = sparse.load_npz(os.path.join(xform_dir, space, f'{sid}_overlap_{lr}h.npz')).shape[1]
+            except Exception as e:
+                errors.append(f'{space} {lr}h: cannot get the number of vertices '
+                              f'({type(e).__name__}: {e})')
+                n = None
+            n_vertices[lr, space] = n
+
+    for run in runs:
+        label = run['label']
+        try:
+            n_frames = int(nib.load(run['bold_fn']).shape[3])
+        except Exception as e:
+            errors.append(f'{label}: cannot get the number of volumes ({type(e).__name__}: {e})')
+            n_frames = None
+        outputs = {}
+        for lr in 'lr':
+            for space, tag in combinations:
+                rel = os.path.join(space, f'{lr}-cerebrum', tag, f'sub-{sid}_{label}.npy')
+                nv = n_vertices[lr, space]
+                data, errs = _check_array(os.path.join(out_dir, rel), (n_frames, nv))
+                coverage, cov_errs = _check_array(os.path.join(coverage_dir, rel), (nv,))
+                if coverage is not None and not cov_errs:
+                    if coverage.min(initial=0.0) < -1e-6 or coverage.max(initial=0.0) > 1 + 1e-6:
+                        cov_errs.append(f'values outside [0, 1] ({coverage.min()} to {coverage.max()})')
+                errors += [f'{rel}: {_}' for _ in errs] + [f'{rel}: coverage: {_}' for _ in cov_errs]
+                if errs or cov_errs:
+                    continue
+                mean = data.mean(axis=0)
+                median = float(np.median(mean)) if mean.size else 0.0
+                n_low = int(np.sum(mean < low_signal * median))
+                n_cov = int(np.sum(coverage < low_coverage))
+                if n_low:
+                    warns.append(f'{rel}: {n_low} vertices with low signal')
+                if n_cov:
+                    warns.append(f'{rel}: {n_cov} vertices with low coverage')
+                outputs[rel] = {'n_vertices': int(data.shape[1]), 'median_mean': median,
+                                'n_low_signal': n_low, 'n_low_coverage': n_cov}
+        report[label] = {'n_frames': n_frames, 'outputs': outputs}
+    return {'runs': report, 'errors': errors, 'warnings': warns}
+
+
 def interpolate(img, ijk, fill=np.nan, kwargs={'order': 1}):
     shape = img.shape
     ijk = np.moveaxis(ijk, -1, 0)
